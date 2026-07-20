@@ -14,7 +14,25 @@ $blocker = $null
 
 try {
     New-Item -ItemType Directory -Path $testLocal, $testCodex | Out-Null
-    Copy-Item -LiteralPath (Join-Path $realUserProfile '.codex\config.toml') -Destination (Join-Path $testCodex 'config.toml')
+    $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+    $listener.Start()
+    $testPort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+    $listener.Stop()
+    $fixtureConfig = @'
+model = "gpt-5.6-terra"
+model_provider = "openai_http"
+
+[model_providers.openai_http]
+name = "OpenAI HTTP"
+base_url = "https://chatgpt.com/backend-api/codex"
+wire_api = "responses"
+requires_openai_auth = true
+'@
+    [IO.File]::WriteAllText(
+        (Join-Path $testCodex 'config.toml'),
+        $fixtureConfig + [Environment]::NewLine,
+        [Text.UTF8Encoding]::new($false)
+    )
     $before = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $testCodex 'config.toml')).Hash
 
     $env:LOCALAPPDATA = $testLocal
@@ -23,16 +41,20 @@ try {
     $env:PATH = $realLocalBin + ';' + $oldPath
 
     'placeholder-dpapi-credential-for-install-test' |
-        node dist/cli.mjs config set --base-url https://example.invalid --api-key-stdin
+        node dist/cli.mjs config set --base-url https://example.invalid --api-key-stdin --upstream-proxy http://127.0.0.1:7890 --port $testPort
     if ($LASTEXITCODE -ne 0) { throw 'Initial configuration failed.' }
 
     node dist/cli.mjs install
     if ($LASTEXITCODE -ne 0) { throw 'Installation failed.' }
     $firstHealth = node dist/cli.mjs status | ConvertFrom-Json
     if (-not $firstHealth.ok) { throw 'Daemon did not become healthy.' }
+    $runtimeNode = Join-Path $testLocal 'codex-fallback-router\bin\codex.exe'
+    if (-not (Test-Path -LiteralPath $runtimeNode)) { throw 'Codex-named daemon runtime was not installed.' }
+    $installedStatus = & (Join-Path $testHome '.local\bin\codex-fallback.cmd') status | ConvertFrom-Json
+    if (-not $installedStatus.ok) { throw 'Installed command shim could not reach the daemon.' }
 
     'replacement-dpapi-credential-for-install-test' |
-        node dist/cli.mjs config set --base-url https://fallback.example.invalid --api-key-stdin
+        node dist/cli.mjs config set --base-url https://fallback.example.invalid --api-key-stdin --port $testPort
     if ($LASTEXITCODE -ne 0) { throw 'Live configuration update failed.' }
     $secondHealth = node dist/cli.mjs status | ConvertFrom-Json
     if (-not $secondHealth.ok) { throw 'Daemon did not restart after configuration change.' }
@@ -46,6 +68,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Uninstall failed.' }
     $after = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $testCodex 'config.toml')).Hash
     if ($before -ne $after) { throw 'Uninstall did not restore the original Codex config.' }
+    if (Test-Path -LiteralPath $runtimeNode) { throw 'Uninstall left the Codex-named daemon runtime behind.' }
 
     'port-conflict-test-credential-value' |
         node dist/cli.mjs config set --base-url https://example.invalid --api-key-stdin

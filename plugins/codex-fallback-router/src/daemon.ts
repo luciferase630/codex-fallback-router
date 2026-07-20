@@ -16,6 +16,25 @@ interface PidState {
   version: string;
 }
 
+async function readMatchingPidState(paths: AppPaths, health: HealthStatus): Promise<PidState | undefined> {
+  try {
+    const state = JSON.parse(await readFile(paths.pidFile, "utf8")) as Partial<PidState>;
+    if (state.pid !== health.pid || typeof state.port !== "number") return undefined;
+    return state as PidState;
+  } catch {
+    return undefined;
+  }
+}
+
+async function waitForManagedHealth(paths: AppPaths, deadline: number): Promise<HealthStatus | undefined> {
+  while (Date.now() < deadline) {
+    const health = await getHealth(paths);
+    if (health && (await readMatchingPidState(paths, health))) return health;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  return undefined;
+}
+
 export interface HealthStatus {
   ok: true;
   pid: number;
@@ -91,12 +110,17 @@ export async function startDaemon(options: {
 }): Promise<HealthStatus> {
   const paths = options.paths ?? getAppPaths();
   const existing = await getHealth(paths);
-  if (existing) return existing;
+  if (existing) {
+    const managed = await waitForManagedHealth(paths, Date.now() + 2_000);
+    if (managed) return managed;
+    throw new Error("Router is healthy but its PID file is missing or inconsistent.");
+  }
   await readRouterConfig(paths);
   await readApiKey(paths);
   const preferredCli = (await pathExists(paths.runtimeCli)) ? paths.runtimeCli : options.cliPath ?? process.argv[1];
   if (!preferredCli) throw new Error("Cannot locate the CLI bundle for daemon startup.");
-  const child = spawn(process.execPath, [preferredCli, "daemon"], {
+  const daemonExecutable = (await pathExists(paths.runtimeNode)) ? paths.runtimeNode : process.execPath;
+  const child = spawn(daemonExecutable, [preferredCli, "daemon"], {
     detached: true,
     stdio: "ignore",
     windowsHide: true,
@@ -104,24 +128,24 @@ export async function startDaemon(options: {
   });
   child.unref();
   const deadline = Date.now() + 8_000;
-  while (Date.now() < deadline) {
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    const health = await getHealth(paths);
-    if (health) return health;
-  }
+  const health = await waitForManagedHealth(paths, deadline);
+  if (health) return health;
   throw new Error("Router daemon did not become healthy within 8 seconds.");
 }
 
 export async function stopDaemon(paths: AppPaths = getAppPaths()): Promise<boolean> {
-  const health = await getHealth(paths);
+  let health = await getHealth(paths);
   if (!health) {
     await rm(paths.pidFile, { force: true });
     return false;
   }
-  if (!(await pathExists(paths.pidFile))) throw new Error("Router is healthy but its PID file is missing.");
-  const state = JSON.parse(await readFile(paths.pidFile, "utf8")) as Partial<PidState>;
-  if (state.pid !== health.pid) throw new Error("Router PID state does not match the healthy process.");
-  process.kill(health.pid, "SIGTERM");
+  let state = await readMatchingPidState(paths, health);
+  if (!state) {
+    health = (await waitForManagedHealth(paths, Date.now() + 2_000)) ?? health;
+    state = await readMatchingPidState(paths, health);
+  }
+  if (!state) throw new Error("Router is healthy but its PID file is missing or inconsistent.");
+  process.kill(state.pid, "SIGTERM");
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 150));

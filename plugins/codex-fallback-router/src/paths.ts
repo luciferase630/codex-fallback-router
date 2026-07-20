@@ -13,6 +13,7 @@ export interface AppPaths {
   logFile: string;
   backupDir: string;
   runtimeCli: string;
+  runtimeNode: string;
   commandShim: string;
   codexConfigFile: string;
 }
@@ -33,6 +34,7 @@ export function getAppPaths(environment = process.env): AppPaths {
     logFile: join(runtimeDir, "router.log"),
     backupDir: join(runtimeDir, "backups"),
     runtimeCli: join(runtimeDir, "bin", "cli.mjs"),
+    runtimeNode: join(runtimeDir, "bin", "codex.exe"),
     commandShim: join(localBin, "codex-fallback.cmd"),
     codexConfigFile: join(codexHome, "config.toml"),
   };
@@ -57,4 +59,3 @@ export function locateSourceTree(cliPath = process.argv[1]): {
 export function moduleDirectory(importMetaUrl: string): string {
   return dirname(fileURLToPath(importMetaUrl));
 }
-

@@ -2,6 +2,7 @@ import { readCodexConfig, inspectRootModel } from "./codex-config.js";
 import { fallbackResponsesUrl, readRouterConfig, type RouterConfig } from "./config.js";
 import { readApiKey } from "./dpapi.js";
 import { getAppPaths, type AppPaths } from "./paths.js";
+import { openUpstreamRequest } from "./transport.js";
 
 const MAX_SMOKE_RESPONSE_BYTES = 2 * 1024 * 1024;
 const SMOKE_TIMEOUT_MS = 45_000;
@@ -26,27 +27,23 @@ function safeNetworkCode(error: unknown): string {
   return "NETWORK_ERROR";
 }
 
-async function readLimitedResponse(response: Response): Promise<string> {
-  const declaredLength = Number(response.headers.get("content-length"));
+async function readLimitedResponse(response: import("node:http").IncomingMessage): Promise<string> {
+  const declaredLength = Number(response.headers["content-length"]);
   if (Number.isFinite(declaredLength) && declaredLength > MAX_SMOKE_RESPONSE_BYTES) {
     throw new Error("Fallback smoke test response exceeded the 2 MiB safety limit.");
   }
-  if (!response.body) return "";
-  const reader = response.body.getReader();
-  const chunks: Uint8Array[] = [];
+  const chunks: Buffer[] = [];
   let total = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    if (!value) continue;
-    total += value.byteLength;
+  for await (const value of response) {
+    const chunk = Buffer.from(value);
+    total += chunk.byteLength;
     if (total > MAX_SMOKE_RESPONSE_BYTES) {
-      await reader.cancel();
+      response.destroy();
       throw new Error("Fallback smoke test response exceeded the 2 MiB safety limit.");
     }
-    chunks.push(value);
+    chunks.push(chunk);
   }
-  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString("utf8");
+  return Buffer.concat(chunks).toString("utf8");
 }
 
 export async function smokeTestFallback(options: {
@@ -58,23 +55,27 @@ export async function smokeTestFallback(options: {
   const model = options.model.trim();
   if (!model) throw new Error("A model is required for the fallback smoke test.");
   const target = fallbackResponsesUrl(options.config);
-  let response: Response;
+  let response: import("node:http").IncomingMessage;
+  const requestBody = Buffer.from(JSON.stringify({
+    model,
+    input: "Reply with exactly: OK",
+    max_output_tokens: 16,
+    store: false,
+    stream: false,
+  }));
   try {
-    response = await fetch(target, {
+    response = await openUpstreamRequest({
+      target,
       method: "POST",
       headers: {
         authorization: `Bearer ${options.apiKey}`,
         "content-type": "application/json",
         accept: "application/json",
+        "content-length": requestBody.length,
       },
-      body: JSON.stringify({
-        model,
-        input: "Reply with exactly: OK",
-        max_output_tokens: 16,
-        store: false,
-        stream: false,
-      }),
-      signal: AbortSignal.timeout(options.timeoutMs ?? SMOKE_TIMEOUT_MS),
+      body: requestBody,
+      timeoutMs: options.timeoutMs ?? SMOKE_TIMEOUT_MS,
+      ...(options.config.upstreamProxyUrl ? { proxyUrl: options.config.upstreamProxyUrl } : {}),
     });
   } catch (error) {
     throw new Error(
@@ -83,8 +84,9 @@ export async function smokeTestFallback(options: {
   }
 
   const responseText = await readLimitedResponse(response);
-  if (!response.ok) {
-    throw new Error(`Fallback smoke test failed with HTTP ${response.status}.`);
+  const status = response.statusCode ?? 502;
+  if (status < 200 || status >= 300) {
+    throw new Error(`Fallback smoke test failed with HTTP ${status}.`);
   }
   let parsed: unknown;
   try {
@@ -104,7 +106,7 @@ export async function smokeTestFallback(options: {
   return {
     endpoint: target.origin + target.pathname,
     model,
-    status: response.status,
+    status,
     responseIdPresent,
   };
 }

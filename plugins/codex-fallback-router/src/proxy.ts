@@ -18,6 +18,7 @@ import {
 import { QuotaLatch } from "./latch.js";
 import { SafeLogger } from "./logger.js";
 import { classifyQuotaResponse, classifyQuotaSseEvent } from "./quota.js";
+import { createUpstreamRequest, openUpstreamRequest } from "./transport.js";
 
 const MAX_RESPONSE_REQUEST_BYTES = 128 * 1024 * 1024;
 const MAX_ERROR_BYTES = 2 * 1024 * 1024;
@@ -25,29 +26,8 @@ const INITIAL_SSE_BYTES = 64 * 1024;
 const INITIAL_SSE_TIMEOUT_MS = 5_000;
 const LOCAL_PREFIX = "/backend-api/codex";
 
-interface OpenRequestOptions {
-  target: URL;
-  method: string;
-  headers: OutgoingHttpHeaders;
-  body?: Buffer;
-}
-
 function requestModule(target: URL): typeof http | typeof https {
   return target.protocol === "https:" ? https : http;
-}
-
-function openRequest(options: OpenRequestOptions): Promise<IncomingMessage> {
-  return new Promise((resolve, reject) => {
-    const request = requestModule(options.target).request(
-      options.target,
-      { method: options.method, headers: options.headers },
-      resolve,
-    );
-    request.on("error", reject);
-    request.setTimeout(120_000, () => request.destroy(new Error("Upstream request timed out.")));
-    if (options.body) request.end(options.body);
-    else request.end();
-  });
 }
 
 async function readLimited(stream: IncomingMessage, maximum: number): Promise<Buffer> {
@@ -188,15 +168,25 @@ export async function createRouterServer(options: {
 
   async function proxyPassthrough(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const target = officialTarget(config, request.url);
-    const upstreamRequest = requestModule(target).request(
-      target,
-      { method: request.method, headers: primaryRequestHeaders(request.headers) },
-      (upstream) => {
-        response.writeHead(upstream.statusCode ?? 502, responseHeaders(upstream.headers));
-        upstream.pipe(response);
-      },
-    );
-    upstreamRequest.on("error", () => {
+    let upstreamRequest;
+    try {
+      upstreamRequest = await createUpstreamRequest(
+        {
+          target,
+          method: request.method ?? "GET",
+          headers: primaryRequestHeaders(request.headers),
+          ...(config.upstreamProxyUrl ? { proxyUrl: config.upstreamProxyUrl } : {}),
+        },
+        (upstream) => {
+          response.writeHead(upstream.statusCode ?? 502, responseHeaders(upstream.headers));
+          upstream.pipe(response);
+        },
+      );
+    } catch {
+      writeError(response, 502, "primary_unreachable", "Official ChatGPT backend is unreachable.");
+      return;
+    }
+    upstreamRequest.once("error", () => {
       if (!response.headersSent) writeError(response, 502, "primary_unreachable", "Official ChatGPT backend is unreachable.");
       else response.destroy();
     });
@@ -218,11 +208,12 @@ export async function createRouterServer(options: {
       return;
     }
     try {
-      const upstream = await openRequest({
+      const upstream = await openUpstreamRequest({
         target: fallbackResponsesUrl(config),
         method: request.method ?? "POST",
         headers: fallbackRequestHeaders(request.headers, apiKey, fallbackBody.length),
         body: fallbackBody,
+        ...(config.upstreamProxyUrl ? { proxyUrl: config.upstreamProxyUrl } : {}),
       });
       await logger.write({
         event: "upstream_response",
@@ -271,11 +262,12 @@ export async function createRouterServer(options: {
     const started = Date.now();
     let upstream: IncomingMessage;
     try {
-      upstream = await openRequest({
+      upstream = await openUpstreamRequest({
         target: officialTarget(config, request.url),
         method: request.method ?? "POST",
         headers: { ...primaryRequestHeaders(request.headers), "content-length": body.length },
         body,
+        ...(config.upstreamProxyUrl ? { proxyUrl: config.upstreamProxyUrl } : {}),
       });
     } catch {
       await logger.write({

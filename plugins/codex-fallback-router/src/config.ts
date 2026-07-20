@@ -19,6 +19,7 @@ export interface RouterConfig {
   listenPort: number;
   officialBaseUrl: string;
   latchMinutes: number;
+  upstreamProxyUrl?: string;
 }
 
 export function normalizeBaseUrl(raw: string): string {
@@ -55,11 +56,34 @@ export function normalizeResponsesPath(raw: string | undefined, baseUrl: string)
   return basePath.endsWith("/v1") ? "/responses" : "/v1/responses";
 }
 
+export function normalizeUpstreamProxyUrl(raw: string): string {
+  let proxy: URL;
+  try {
+    proxy = new URL(raw.trim());
+  } catch {
+    throw new Error("Upstream proxy URL is not valid.");
+  }
+  if (proxy.protocol !== "http:") throw new Error("Upstream proxy must use HTTP CONNECT.");
+  if (proxy.username || proxy.password) throw new Error("Upstream proxy URL must not contain credentials.");
+  if (!['127.0.0.1', 'localhost', '::1'].includes(proxy.hostname)) {
+    throw new Error("Upstream proxy must be a loopback address.");
+  }
+  const port = Number(proxy.port);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error("Upstream proxy URL must include a valid port.");
+  }
+  if ((proxy.pathname && proxy.pathname !== "/") || proxy.search || proxy.hash) {
+    throw new Error("Upstream proxy URL must not contain a path, query, or fragment.");
+  }
+  return proxy.origin;
+}
+
 export function createRouterConfig(options: {
   baseUrl: string;
   responsesPath?: string;
   fallbackModel?: string;
   listenPort?: number;
+  upstreamProxyUrl?: string;
 }): RouterConfig {
   const fallbackBaseUrl = normalizeBaseUrl(options.baseUrl);
   const listenPort = options.listenPort ?? DEFAULT_PORT;
@@ -76,6 +100,9 @@ export function createRouterConfig(options: {
     listenPort,
     officialBaseUrl: OFFICIAL_CHATGPT_BASE_URL,
     latchMinutes: DEFAULT_LATCH_MINUTES,
+    ...(options.upstreamProxyUrl
+      ? { upstreamProxyUrl: normalizeUpstreamProxyUrl(options.upstreamProxyUrl) }
+      : {}),
   };
 }
 
@@ -101,6 +128,7 @@ export async function readRouterConfig(paths: AppPaths): Promise<RouterConfig> {
   }
   normalizeBaseUrl(parsed.fallbackBaseUrl);
   normalizeResponsesPath(parsed.fallbackResponsesPath, parsed.fallbackBaseUrl);
+  if (parsed.upstreamProxyUrl !== undefined) normalizeUpstreamProxyUrl(parsed.upstreamProxyUrl);
   return parsed as RouterConfig;
 }
 
@@ -115,4 +143,3 @@ export function fallbackResponsesUrl(config: RouterConfig): URL {
   }
   return base;
 }
-

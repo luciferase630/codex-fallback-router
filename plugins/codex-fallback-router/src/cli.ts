@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 
 import { CLI_NAME, VERSION } from "./constants.js";
 import { createRouterConfig, writeRouterConfig } from "./config.js";
-import { storeApiKey } from "./dpapi.js";
+import { readApiKey, storeApiKey } from "./dpapi.js";
 import { getHealth, runDaemon, startDaemon, stopDaemon } from "./daemon.js";
 import { installRouter, uninstallRouter } from "./install.js";
 import { assertNodeVersion } from "./platform.js";
@@ -66,7 +66,7 @@ function printHelp(): void {
   console.log(`${CLI_NAME} ${VERSION}
 
 Usage:
-  ${CLI_NAME} config set --base-url <https-url> --api-key-stdin [--responses-path <path>] [--fallback-model <id>]
+  ${CLI_NAME} config set --base-url <https-url> (--api-key-stdin | --reuse-api-key) [--responses-path <path>] [--fallback-model <id>] [--upstream-proxy <url>]
   ${CLI_NAME} install [--allow-untested-version]
   ${CLI_NAME} start [--quiet]
   ${CLI_NAME} stop
@@ -79,26 +79,31 @@ Usage:
 async function handleConfigSet(args: ParsedArgs): Promise<void> {
   const baseUrl = stringFlag(args, "base-url");
   if (!baseUrl) throw new Error("--base-url is required.");
-  if (!booleanFlag(args, "api-key-stdin")) {
-    throw new Error("Use --api-key-stdin so the API key is not stored in shell history.");
+  const keyFromStdin = booleanFlag(args, "api-key-stdin");
+  const reuseApiKey = booleanFlag(args, "reuse-api-key");
+  if (keyFromStdin === reuseApiKey) {
+    throw new Error("Use exactly one of --api-key-stdin or --reuse-api-key.");
   }
   const portRaw = stringFlag(args, "port");
   const responsesPath = stringFlag(args, "responses-path");
   const fallbackModel = stringFlag(args, "fallback-model");
+  const upstreamProxyUrl = stringFlag(args, "upstream-proxy");
   const config = createRouterConfig({
     baseUrl,
     ...(responsesPath ? { responsesPath } : {}),
     ...(fallbackModel ? { fallbackModel } : {}),
     ...(portRaw ? { listenPort: Number.parseInt(portRaw, 10) } : {}),
+    ...(upstreamProxyUrl ? { upstreamProxyUrl } : {}),
   });
-  const secret = await readStdin();
   const paths = getAppPaths();
+  if (reuseApiKey) await readApiKey(paths);
+  const secret = keyFromStdin ? await readStdin() : undefined;
   const wasRunning = await getHealth(paths);
   const previousConfig = wasRunning ? await readFile(paths.configFile) : undefined;
   const previousSecret = wasRunning ? await readFile(paths.secretFile) : undefined;
   if (wasRunning) await stopDaemon(paths);
   try {
-    await storeApiKey(paths, secret);
+    if (secret !== undefined) await storeApiKey(paths, secret);
     await writeRouterConfig(paths, config);
     if (wasRunning) await startDaemon({ quiet: true, paths });
   } catch (error) {

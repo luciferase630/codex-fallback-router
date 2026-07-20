@@ -74,7 +74,7 @@ Installation is transactional. A plugin error, bad configuration, port conflict,
 After installation, the shim is placed in `%USERPROFILE%\.local\bin`, the same location normally used by the Codex CLI:
 
 ```text
-codex-fallback config set --base-url <https-url> --api-key-stdin [--responses-path <path>] [--fallback-model <id>] [--port <port>]
+codex-fallback config set --base-url <https-url> (--api-key-stdin | --reuse-api-key) [--responses-path <path>] [--fallback-model <id>] [--port <port>] [--upstream-proxy <url>]
 codex-fallback install [--allow-untested-version]
 codex-fallback start [--quiet]
 codex-fallback stop
@@ -92,6 +92,12 @@ Get-Clipboard | codex-fallback config set --base-url https://fallback.example.co
 The URL is treated as a root and normally resolves to `/v1/responses`. A base ending in `/v1` resolves to `/responses`. Use `--responses-path` only when the provider requires a different path.
 
 `config set` restarts a running daemon and rolls back both configuration and encrypted credential if the new daemon cannot become healthy. Omitting `--fallback-model` preserves the model selected in the active Codex task.
+
+If Codex is routed through a local Clash/Mihomo-style proxy but Node.js is not, pass its loopback HTTP CONNECT endpoint, for example `--upstream-proxy http://127.0.0.1:7890`. Remote and credential-bearing proxy URLs are rejected.
+
+On Windows, proxy-enabled installation copies the current Node runtime outside the repository as `%LOCALAPPDATA%\codex-fallback-router\bin\codex.exe` and uses it for both the router daemon and the installed `codex-fallback` command. This lets process-name proxy rules apply the same route used by Codex. Uninstall removes the copy.
+
+Use `--reuse-api-key` for later non-secret URL, path, model, port, or proxy changes when a DPAPI credential already exists.
 
 ## Failover policy
 

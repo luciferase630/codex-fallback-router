@@ -20,6 +20,7 @@ import {
   fallbackResponsesUrl,
   normalizeBaseUrl,
   normalizeResponsesPath,
+  normalizeUpstreamProxyUrl,
 } from "../../src/config.js";
 import { readApiKey, storeApiKey, validateApiKey } from "../../src/dpapi.js";
 import type { AppPaths } from "../../src/paths.js";
@@ -34,6 +35,14 @@ test("normalizes fallback roots and Responses API paths", () => {
   assert.throws(() => normalizeBaseUrl("http://example.test"), /HTTPS/);
   assert.throws(() => normalizeBaseUrl("https://user:pass@example.test"), /credentials/);
   assert.throws(() => normalizeResponsesPath("responses", "https://example.test"), /start with/);
+});
+
+test("accepts only credential-free loopback HTTP CONNECT proxies", () => {
+  assert.equal(normalizeUpstreamProxyUrl("http://127.0.0.1:7890"), "http://127.0.0.1:7890");
+  assert.equal(normalizeUpstreamProxyUrl("http://localhost:7890/"), "http://localhost:7890");
+  assert.throws(() => normalizeUpstreamProxyUrl("https://127.0.0.1:7890"), /HTTP CONNECT/);
+  assert.throws(() => normalizeUpstreamProxyUrl("http://proxy.example:7890"), /loopback/);
+  assert.throws(() => normalizeUpstreamProxyUrl("http://user:pass@127.0.0.1:7890"), /credentials/);
 });
 
 test("preserves the requested model unless an override is explicit", () => {
@@ -128,6 +137,7 @@ test("DPAPI protects and restores the API key for the current Windows user", { s
     logFile: join(root, "router.log"),
     backupDir: join(root, "backups"),
     runtimeCli: join(root, "bin", "cli.mjs"),
+    runtimeNode: join(root, "bin", "codex.exe"),
     commandShim: join(root, "bin", "codex-fallback.cmd"),
     codexConfigFile: join(root, "config.toml"),
   } satisfies AppPaths;

@@ -54,12 +54,25 @@ async function registerMarketplace(repoRoot: string): Promise<void> {
   }
 }
 
-async function installRuntimeCli(sourceCli: string, paths: AppPaths): Promise<void> {
+async function installRuntimeCli(
+  sourceCli: string,
+  paths: AppPaths,
+  useCodexNamedRuntime: boolean,
+): Promise<void> {
   await ensureParent(paths.runtimeCli);
   await copyFile(sourceCli, paths.runtimeCli);
+  if (useCodexNamedRuntime) {
+    await copyFile(process.execPath, paths.runtimeNode);
+  } else {
+    await rm(paths.runtimeNode, { force: true });
+  }
   await ensureParent(paths.commandShim);
-  const shim = `@echo off\r\nnode "${paths.runtimeCli}" %*\r\n`;
-  await writeFile(paths.commandShim, shim, "utf8");
+  const runtimeCommand = useCodexNamedRuntime
+    ? `"%LOCALAPPDATA%\\codex-fallback-router\\bin\\codex.exe"`
+    : "node";
+  const runtimeCli = `"%LOCALAPPDATA%\\codex-fallback-router\\bin\\cli.mjs"`;
+  const shim = `@echo off\r\n${runtimeCommand} ${runtimeCli} %*\r\n`;
+  await writeFile(paths.commandShim, shim, "ascii");
 }
 
 export async function installRouter(options: {
@@ -70,7 +83,7 @@ export async function installRouter(options: {
   const paths = options.paths ?? getAppPaths();
   const sourceCli = options.sourceCli ?? process.argv[1];
   if (!sourceCli) throw new Error("Cannot locate the built CLI. Run 'npm run build' first.");
-  await readRouterConfig(paths);
+  const initialRouterConfig = await readRouterConfig(paths);
   await readApiKey(paths);
 
   const detectedVersion = await detectCodexDesktopVersion();
@@ -105,7 +118,7 @@ export async function installRouter(options: {
     await registerMarketplace(sourceTree.repoRoot);
     await installLocalPlugin(sourceTree.marketplaceFile);
     pluginInstalled = true;
-    await installRuntimeCli(sourceCli, paths);
+    await installRuntimeCli(sourceCli, paths, Boolean(initialRouterConfig.upstreamProxyUrl));
     await startDaemon({ quiet: true, paths, cliPath: paths.runtimeCli });
     daemonStarted = !wasRunning;
 
@@ -148,6 +161,7 @@ export async function installRouter(options: {
       await rm(paths.stateFile, { force: true });
       await rm(paths.commandShim, { force: true });
       await rm(paths.runtimeCli, { force: true });
+      await rm(paths.runtimeNode, { force: true });
       if (pluginInstalled) {
         try {
           await uninstallLocalPlugin();
@@ -203,6 +217,7 @@ export async function uninstallRouter(options: {
   await rm(paths.stateFile, { force: true });
   await rm(paths.pidFile, { force: true });
   await rm(paths.commandShim, { force: true });
+  await rm(paths.runtimeNode, { force: true });
   if (!options.keepSecret) await rm(paths.secretFile, { force: true });
   return { restored };
 }
