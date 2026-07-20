@@ -1,0 +1,131 @@
+import { spawn } from "node:child_process";
+import { readFile, rm } from "node:fs/promises";
+
+import { VERSION } from "./constants.js";
+import { readRouterConfig } from "./config.js";
+import { readApiKey } from "./dpapi.js";
+import { atomicWriteFile, pathExists } from "./file-utils.js";
+import { SafeLogger } from "./logger.js";
+import { getAppPaths, type AppPaths } from "./paths.js";
+import { createRouterServer } from "./proxy.js";
+
+interface PidState {
+  pid: number;
+  port: number;
+  startedAt: string;
+  version: string;
+}
+
+export interface HealthStatus {
+  ok: true;
+  pid: number;
+  version: string;
+  mode: "primary" | "fallback";
+  fallbackUntil?: string;
+}
+
+export async function getHealth(paths: AppPaths = getAppPaths()): Promise<HealthStatus | undefined> {
+  let config;
+  try {
+    config = await readRouterConfig(paths);
+  } catch {
+    return undefined;
+  }
+  try {
+    const response = await fetch(
+      `http://${config.listenHost}:${config.listenPort}/_codex-fallback/health`,
+      { signal: AbortSignal.timeout(1_500), cache: "no-store" },
+    );
+    if (!response.ok) return undefined;
+    const parsed = (await response.json()) as Partial<HealthStatus>;
+    return parsed.ok === true && typeof parsed.pid === "number" ? (parsed as HealthStatus) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function runDaemon(paths: AppPaths = getAppPaths()): Promise<void> {
+  const config = await readRouterConfig(paths);
+  const apiKey = await readApiKey(paths);
+  const logger = new SafeLogger(paths.logFile);
+  await logger.initialize();
+  const runtime = await createRouterServer({
+    config,
+    apiKey,
+    logger,
+    health: () => ({
+      ok: true,
+      pid: process.pid,
+      version: VERSION,
+      mode: runtime.latch.isActive() ? "fallback" : "primary",
+      ...(runtime.latch.until ? { fallbackUntil: new Date(runtime.latch.until).toISOString() } : {}),
+    }),
+  });
+  await new Promise<void>((resolve, reject) => {
+    runtime.server.once("error", reject);
+    runtime.server.listen(config.listenPort, config.listenHost, () => resolve());
+  });
+  const pidState: PidState = {
+    pid: process.pid,
+    port: config.listenPort,
+    startedAt: new Date().toISOString(),
+    version: VERSION,
+  };
+  await atomicWriteFile(paths.pidFile, `${JSON.stringify(pidState, null, 2)}\n`);
+  await logger.write({ event: "daemon_started" });
+
+  await new Promise<void>((resolve) => {
+    const shutdown = () => resolve();
+    process.once("SIGTERM", shutdown);
+    process.once("SIGINT", shutdown);
+  });
+  await new Promise<void>((resolve) => runtime.server.close(() => resolve()));
+  await rm(paths.pidFile, { force: true });
+  await logger.write({ event: "daemon_stopped" });
+}
+
+export async function startDaemon(options: {
+  quiet: boolean;
+  paths?: AppPaths;
+  cliPath?: string;
+}): Promise<HealthStatus> {
+  const paths = options.paths ?? getAppPaths();
+  const existing = await getHealth(paths);
+  if (existing) return existing;
+  await readRouterConfig(paths);
+  await readApiKey(paths);
+  const preferredCli = (await pathExists(paths.runtimeCli)) ? paths.runtimeCli : options.cliPath ?? process.argv[1];
+  if (!preferredCli) throw new Error("Cannot locate the CLI bundle for daemon startup.");
+  const child = spawn(process.execPath, [preferredCli, "daemon"], {
+    detached: true,
+    stdio: "ignore",
+    windowsHide: true,
+    env: process.env,
+  });
+  child.unref();
+  const deadline = Date.now() + 8_000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    const health = await getHealth(paths);
+    if (health) return health;
+  }
+  throw new Error("Router daemon did not become healthy within 8 seconds.");
+}
+
+export async function stopDaemon(paths: AppPaths = getAppPaths()): Promise<boolean> {
+  const health = await getHealth(paths);
+  if (!health) {
+    await rm(paths.pidFile, { force: true });
+    return false;
+  }
+  if (!(await pathExists(paths.pidFile))) throw new Error("Router is healthy but its PID file is missing.");
+  const state = JSON.parse(await readFile(paths.pidFile, "utf8")) as Partial<PidState>;
+  if (state.pid !== health.pid) throw new Error("Router PID state does not match the healthy process.");
+  process.kill(health.pid, "SIGTERM");
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (!(await getHealth(paths))) return true;
+  }
+  throw new Error("Router daemon did not stop within 5 seconds.");
+}

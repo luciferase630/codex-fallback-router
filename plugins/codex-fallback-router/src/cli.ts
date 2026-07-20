@@ -1,6 +1,7 @@
 import { CLI_NAME, VERSION } from "./constants.js";
 import { createRouterConfig, writeRouterConfig } from "./config.js";
 import { storeApiKey } from "./dpapi.js";
+import { getHealth, runDaemon, startDaemon, stopDaemon } from "./daemon.js";
 import { installRouter, uninstallRouter } from "./install.js";
 import { assertNodeVersion } from "./platform.js";
 import { getAppPaths } from "./paths.js";
@@ -114,12 +115,33 @@ async function main(): Promise<void> {
     return;
   }
   if (args.command === "uninstall") {
+    await stopDaemon();
     const result = await uninstallRouter({ keepSecret: booleanFlag(args, "keep-secret") });
     console.log(result.restored ? "Codex configuration restored." : "No installed configuration was found.");
     return;
   }
-  if (["start", "stop", "status", "smoke-test"].includes(args.command)) {
-    throw new Error(`Command '${args.command}' will be enabled by the routing milestone.`);
+  if (args.command === "start") {
+    const health = await startDaemon({ quiet: booleanFlag(args, "quiet") });
+    if (!booleanFlag(args, "quiet")) console.log(`Router is running (PID ${health.pid}, mode ${health.mode}).`);
+    return;
+  }
+  if (args.command === "stop") {
+    const stopped = await stopDaemon();
+    console.log(stopped ? "Router stopped." : "Router was not running.");
+    return;
+  }
+  if (args.command === "status") {
+    const health = await getHealth();
+    if (!health) throw new Error("Router is not running.");
+    console.log(JSON.stringify(health, null, 2));
+    return;
+  }
+  if (args.command === "daemon") {
+    await runDaemon();
+    return;
+  }
+  if (args.command === "smoke-test") {
+    throw new Error("Command 'smoke-test' will be enabled by the validation milestone.");
   }
   throw new Error(`Unknown command: ${args.command}`);
 }
