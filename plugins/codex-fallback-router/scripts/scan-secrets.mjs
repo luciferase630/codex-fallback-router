@@ -39,11 +39,33 @@ function stagedText() {
 function walk(directory) {
   const results = [];
   for (const entry of readdirSync(directory)) {
-    if ([".git", "node_modules", "dist", "coverage"].includes(entry)) continue;
+    if ([".git", "node_modules", "coverage"].includes(entry)) continue;
     const path = join(directory, entry);
     const stat = statSync(path);
     if (stat.isDirectory()) results.push(...walk(path));
     else if (stat.size <= 8 * 1024 * 1024) results.push(path);
+  }
+  return results;
+}
+
+function scanGitObjects() {
+  const objectList = execFileSync(
+    "git",
+    ["cat-file", "--batch-all-objects", "--batch-check=%(objectname) %(objecttype) %(objectsize)"],
+    { cwd: repoRoot, encoding: "utf8", maxBuffer: 64 * 1024 * 1024 },
+  );
+  const results = [];
+  for (const line of objectList.split(/\r?\n/)) {
+    const [objectId, type, sizeRaw] = line.trim().split(/\s+/);
+    const size = Number(sizeRaw);
+    if (!objectId || !["blob", "commit", "tag"].includes(type) || !Number.isFinite(size)) continue;
+    if (size > 8 * 1024 * 1024) continue;
+    const contents = execFileSync("git", ["cat-file", "-p", objectId], {
+      cwd: repoRoot,
+      encoding: "utf8",
+      maxBuffer: 9 * 1024 * 1024,
+    });
+    results.push(...findSecrets(contents, `git object ${objectId}`));
   }
   return results;
 }
@@ -83,6 +105,11 @@ if (mode === "--self-test") {
     findings.push(...findSecrets(history, "git history"));
   } catch {
     // A new repository has no history yet.
+  }
+  try {
+    findings.push(...scanGitObjects());
+  } catch (error) {
+    throw new Error(`Git object scan failed: ${error instanceof Error ? error.message : String(error)}`);
   }
 } else {
   throw new Error(`Unknown scan mode: ${mode}`);
