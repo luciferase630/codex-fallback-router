@@ -1,0 +1,27 @@
+{
+  "name": "codex-fallback-router",
+  "version": "0.1.0",
+  "description": "Local usage-limit fallback router for Codex Desktop",
+  "type": "module",
+  "license": "Apache-2.0",
+  "private": true,
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "codex-fallback": "dist/cli.mjs"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "typecheck": "tsc --noEmit",
+    "test": "tsx --test tests/**/*.test.ts",
+    "secret-scan": "node scripts/scan-secrets.mjs --all"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "esbuild": "^0.25.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
+  }
+}
+

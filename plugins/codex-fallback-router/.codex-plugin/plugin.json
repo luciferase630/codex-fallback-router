@@ -1,0 +1,32 @@
+{
+  "name": "codex-fallback-router",
+  "version": "0.1.0",
+  "description": "Routes Codex Desktop requests to a configured Responses API after a confirmed ChatGPT usage-limit error.",
+  "author": {
+    "name": "luciferase630"
+  },
+  "license": "Apache-2.0",
+  "keywords": [
+    "codex",
+    "fallback",
+    "responses-api",
+    "router"
+  ],
+  "hooks": "./hooks.json",
+  "interface": {
+    "displayName": "Codex Fallback Router",
+    "shortDescription": "Automatic Responses API fallback for Codex Desktop",
+    "longDescription": "Runs a local loopback router that preserves the active Codex model and retries a turn against a configured Responses API only after a confirmed ChatGPT usage-limit error.",
+    "developerName": "luciferase630",
+    "category": "Developer",
+    "capabilities": [
+      "Background",
+      "Network"
+    ],
+    "defaultPrompt": [
+      "Check the fallback router status.",
+      "Run the fallback connectivity smoke test."
+    ],
+    "brandColor": "#2563EB"
+  }
+}

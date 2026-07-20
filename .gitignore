@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+*.log
+*.tmp
+*.bak
+.env
+.env.*
+!.env.example
+*.dpapi
+*.secret
+secrets/
+config.local.json
+.codex-fallback-backup/
+

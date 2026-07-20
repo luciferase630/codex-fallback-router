@@ -1,0 +1,18 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node ./dist/cli.mjs start --quiet",
+            "async": true,
+            "timeoutSec": 10,
+            "statusMessage": "Starting the Codex fallback router"
+          }
+        ]
+      }
+    ]
+  }
+}
+
