@@ -125,7 +125,10 @@ export async function stopDaemon(paths: AppPaths = getAppPaths()): Promise<boole
   const deadline = Date.now() + 5_000;
   while (Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 150));
-    if (!(await getHealth(paths))) return true;
+    if (!(await getHealth(paths))) {
+      await rm(paths.pidFile, { force: true });
+      return true;
+    }
   }
   throw new Error("Router daemon did not stop within 5 seconds.");
 }

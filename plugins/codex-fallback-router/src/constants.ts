@@ -8,4 +8,6 @@ export const DEFAULT_LATCH_MINUTES = 15;
 export const OFFICIAL_CHATGPT_BASE_URL = "https://chatgpt.com/backend-api/codex";
 export const TESTED_CODEX_DESKTOP_VERSION = "26.715.7063.0";
 export const DPAPI_ENTROPY = "codex-fallback-router:v1";
-
+export const MARKETPLACE_NAME = "codex-fallback-router-local";
+export const PLUGIN_NAME = "codex-fallback-router";
+export const PLUGIN_ID = `${PLUGIN_NAME}@${MARKETPLACE_NAME}`;

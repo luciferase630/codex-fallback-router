@@ -1,3 +1,5 @@
+import { readFile } from "node:fs/promises";
+
 import { CLI_NAME, VERSION } from "./constants.js";
 import { createRouterConfig, writeRouterConfig } from "./config.js";
 import { storeApiKey } from "./dpapi.js";
@@ -5,6 +7,7 @@ import { getHealth, runDaemon, startDaemon, stopDaemon } from "./daemon.js";
 import { installRouter, uninstallRouter } from "./install.js";
 import { assertNodeVersion } from "./platform.js";
 import { getAppPaths } from "./paths.js";
+import { atomicWriteFile } from "./file-utils.js";
 
 interface ParsedArgs {
   command: string;
@@ -89,8 +92,26 @@ async function handleConfigSet(args: ParsedArgs): Promise<void> {
   });
   const secret = await readStdin();
   const paths = getAppPaths();
-  await storeApiKey(paths, secret);
-  await writeRouterConfig(paths, config);
+  const wasRunning = await getHealth(paths);
+  const previousConfig = wasRunning ? await readFile(paths.configFile) : undefined;
+  const previousSecret = wasRunning ? await readFile(paths.secretFile) : undefined;
+  if (wasRunning) await stopDaemon(paths);
+  try {
+    await storeApiKey(paths, secret);
+    await writeRouterConfig(paths, config);
+    if (wasRunning) await startDaemon({ quiet: true, paths });
+  } catch (error) {
+    if (wasRunning && previousConfig && previousSecret) {
+      try {
+        await atomicWriteFile(paths.configFile, previousConfig);
+        await atomicWriteFile(paths.secretFile, previousSecret);
+        await startDaemon({ quiet: true, paths });
+      } catch {
+        // Preserve the original configuration error as the actionable failure.
+      }
+    }
+    throw error;
+  }
   console.log(`Configuration saved for ${new URL(config.fallbackBaseUrl).origin}; API key stored with DPAPI.`);
 }
 

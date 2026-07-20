@@ -9,6 +9,7 @@ import https from "node:https";
 import { once } from "node:events";
 
 import { fallbackResponsesUrl, type RouterConfig } from "./config.js";
+import { prepareFallbackRequestBody } from "./context.js";
 import {
   fallbackRequestHeaders,
   primaryRequestHeaders,
@@ -171,23 +172,6 @@ async function readInitialSseEvent(
   });
 }
 
-function prepareFallbackBody(body: Buffer, config: RouterConfig): Buffer {
-  if (!config.fallbackModel) return body;
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(body.toString("utf8"));
-  } catch {
-    throw new Error("Cannot apply a fallback model override to a non-JSON request.");
-  }
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-    throw new Error("Responses request body is not a JSON object.");
-  }
-  return Buffer.from(
-    JSON.stringify({ ...(parsed as Record<string, unknown>), model: config.fallbackModel }),
-    "utf8",
-  );
-}
-
 export interface RouterRuntime {
   server: Server;
   latch: QuotaLatch;
@@ -228,7 +212,7 @@ export async function createRouterServer(options: {
     const started = Date.now();
     let fallbackBody: Buffer;
     try {
-      fallbackBody = prepareFallbackBody(originalBody, config);
+      fallbackBody = prepareFallbackRequestBody(originalBody, config.fallbackModel).body;
     } catch (error) {
       writeError(response, 502, "fallback_body_invalid", (error as Error).message);
       return;

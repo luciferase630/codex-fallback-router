@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 
 export async function runProcess(
   command: string,
@@ -50,6 +50,16 @@ export async function runCodex(
     return runProcess(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "codex", ...args], options);
   }
   return runProcess("codex", args, options);
+}
+
+export function spawnCodex(args: string[]): ChildProcessWithoutNullStreams {
+  if (process.platform === "win32") {
+    return spawn(process.env.ComSpec || "cmd.exe", ["/d", "/s", "/c", "codex", ...args], {
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    });
+  }
+  return spawn("codex", args, { stdio: ["pipe", "pipe", "pipe"] });
 }
 
 export function assertNodeVersion(): void {
