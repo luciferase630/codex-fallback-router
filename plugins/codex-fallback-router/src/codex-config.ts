@@ -14,6 +14,12 @@ export interface CodexConfigEditResult {
   editedText: string;
 }
 
+export interface ModelProviderConfigValues {
+  baseUrl?: string;
+  wireApi?: string;
+  requiresOpenAiAuth?: boolean;
+}
+
 function newlineOf(text: string): string {
   return text.includes("\r\n") ? "\r\n" : "\n";
 }
@@ -59,6 +65,108 @@ export function inspectRootModel(text: string): string | undefined {
     if (value?.trim()) return value.trim();
   }
   return undefined;
+}
+
+export function inspectRootModelProvider(text: string): string | undefined {
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*\[/.test(line)) break;
+    const match = line.match(/^\s*model_provider\s*=\s*(.+?)\s*(?:#.*)?$/);
+    if (!match?.[1]) continue;
+    const value = decodeTomlString(match[1]);
+    if (value?.trim()) return value.trim();
+  }
+  return undefined;
+}
+
+function sectionName(line: string): string | undefined {
+  const match = line.match(/^\s*\[([^\]]+)\]\s*(?:#.*)?$/);
+  return match?.[1]?.trim();
+}
+
+function isProviderSection(name: string | undefined, providerId: string): boolean {
+  return name === `model_providers.${providerId}` || name === `model_providers.${JSON.stringify(providerId)}`;
+}
+
+function providerSectionBounds(lines: string[], providerId: string): { start: number; end: number } {
+  const start = lines.findIndex((line) => isProviderSection(sectionName(line), providerId));
+  if (start < 0) throw new Error(`Active model provider section was not found: ${providerId}`);
+  let end = lines.length;
+  for (let index = start + 1; index < lines.length; index += 1) {
+    if (sectionName(lines[index] ?? "") !== undefined) {
+      end = index;
+      break;
+    }
+  }
+  return { start, end };
+}
+
+export function inspectModelProviderConfig(text: string, providerId: string): ModelProviderConfigValues {
+  const lines = text.split(/\r?\n/);
+  const { start, end } = providerSectionBounds(lines, providerId);
+  const values: ModelProviderConfigValues = {};
+  for (let index = start + 1; index < end; index += 1) {
+    const line = lines[index] ?? "";
+    const baseMatch = line.match(/^\s*base_url\s*=\s*(.+?)\s*(?:#.*)?$/);
+    if (baseMatch?.[1]) {
+      const value = decodeTomlString(baseMatch[1]);
+      if (value !== undefined) values.baseUrl = value;
+    }
+    const wireMatch = line.match(/^\s*wire_api\s*=\s*(.+?)\s*(?:#.*)?$/);
+    if (wireMatch?.[1]) {
+      const value = decodeTomlString(wireMatch[1]);
+      if (value !== undefined) values.wireApi = value;
+    }
+    const authMatch = line.match(/^\s*requires_openai_auth\s*=\s*(true|false)\s*(?:#.*)?$/i);
+    if (authMatch?.[1]) values.requiresOpenAiAuth = authMatch[1].toLowerCase() === "true";
+  }
+  return values;
+}
+
+function setModelProviderBaseUrl(text: string, providerId: string, value: string | undefined): string {
+  const newline = newlineOf(text);
+  const hadTrailingNewline = text.endsWith("\n");
+  const lines = text.split(/\r?\n/);
+  const { start, end } = providerSectionBounds(lines, providerId);
+  const output: string[] = [];
+  let handled = false;
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? "";
+    if (index > start && index < end && /^\s*base_url\s*=/.test(line)) {
+      if (!handled && value !== undefined) output.push(`base_url = ${encodeTomlString(value)}`);
+      handled = true;
+      continue;
+    }
+    output.push(line);
+  }
+  if (!handled && value !== undefined) {
+    let insertAt = end;
+    while (insertAt > start + 1 && (lines[insertAt - 1] ?? "").trim() === "") insertAt -= 1;
+    const removedBeforeInsert = lines.slice(start + 1, insertAt).filter((line) => /^\s*base_url\s*=/.test(line)).length;
+    output.splice(insertAt - removedBeforeInsert, 0, `base_url = ${encodeTomlString(value)}`);
+  }
+  let result = output.join(newline);
+  if (hadTrailingNewline && !result.endsWith(newline)) result += newline;
+  return result;
+}
+
+export function editModelProviderBaseUrl(
+  text: string,
+  providerId: string,
+  desiredBaseUrl: string,
+): { originalBaseUrl?: string; editedText: string } {
+  const originalBaseUrl = inspectModelProviderConfig(text, providerId).baseUrl;
+  return {
+    ...(originalBaseUrl !== undefined ? { originalBaseUrl } : {}),
+    editedText: setModelProviderBaseUrl(text, providerId, desiredBaseUrl),
+  };
+}
+
+export function restoreModelProviderBaseUrl(
+  text: string,
+  providerId: string,
+  originalBaseUrl: string | undefined,
+): string {
+  return setModelProviderBaseUrl(text, providerId, originalBaseUrl);
 }
 
 export function editRootConfig(

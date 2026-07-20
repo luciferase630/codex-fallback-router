@@ -6,9 +6,13 @@ import test from "node:test";
 
 import {
   backupConfig,
+  editModelProviderBaseUrl,
   editRootConfig,
+  inspectModelProviderConfig,
   inspectRootConfig,
   inspectRootModel,
+  inspectRootModelProvider,
+  restoreModelProviderBaseUrl,
   restoreRootConfig,
 } from "../../src/codex-config.js";
 import {
@@ -63,6 +67,41 @@ test("edits and restores only root Codex configuration keys", () => {
 test("reads only the root model used by Codex", () => {
   assert.equal(inspectRootModel(`model = "current-model"\n[profile.test]\nmodel = "other"\n`), "current-model");
   assert.equal(inspectRootModel(`[profile.test]\nmodel = "profile-only"\n`), undefined);
+});
+
+test("routes and restores the active Responses model provider base URL", () => {
+  const original = `model_provider = "openai_http"\n\n[model_providers.openai_http]\nname = "OpenAI HTTP"\nwire_api = "responses"\nrequires_openai_auth = true\n\n[features]\nplugins = true\n`;
+  assert.equal(inspectRootModelProvider(original), "openai_http");
+  assert.deepEqual(inspectModelProviderConfig(original, "openai_http"), {
+    wireApi: "responses",
+    requiresOpenAiAuth: true,
+  });
+
+  const edit = editModelProviderBaseUrl(
+    original,
+    "openai_http",
+    "http://127.0.0.1:45831/backend-api/codex",
+  );
+  assert.equal(edit.originalBaseUrl, undefined);
+  assert.equal(
+    inspectModelProviderConfig(edit.editedText, "openai_http").baseUrl,
+    "http://127.0.0.1:45831/backend-api/codex",
+  );
+  assert.equal(restoreModelProviderBaseUrl(edit.editedText, "openai_http", undefined), original);
+});
+
+test("restores an existing provider base URL without changing other provider fields", () => {
+  const original = `[model_providers.openai_http]\nbase_url = "https://existing.example/v1"\nwire_api = "responses"\nrequires_openai_auth = true\n`;
+  const edit = editModelProviderBaseUrl(
+    original,
+    "openai_http",
+    "http://127.0.0.1:45831/backend-api/codex",
+  );
+  assert.equal(edit.originalBaseUrl, "https://existing.example/v1");
+  assert.equal(
+    restoreModelProviderBaseUrl(edit.editedText, "openai_http", edit.originalBaseUrl),
+    original,
+  );
 });
 
 test("backs up Codex configuration without changing it", async (t) => {

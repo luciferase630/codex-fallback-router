@@ -8,10 +8,14 @@ import {
 import {
   backupConfig,
   contentHash,
+  editModelProviderBaseUrl,
   editRootConfig,
+  inspectModelProviderConfig,
   inspectRootConfig,
+  inspectRootModelProvider,
   readCodexConfig,
   restoreRootConfig,
+  restoreModelProviderBaseUrl,
   writeCodexConfig,
   type RootConfigValues,
 } from "./codex-config.js";
@@ -24,11 +28,13 @@ import { installLocalPlugin, uninstallLocalPlugin } from "./plugin-lifecycle.js"
 import { getAppPaths, locateSourceTree, type AppPaths } from "./paths.js";
 
 export interface InstallState {
-  version: 1;
+  version: 1 | 2;
   installedAt: string;
   codexDesktopVersion: string;
   backupFile: string;
   original: RootConfigValues;
+  providerId?: string;
+  originalProviderBaseUrl?: string;
   installedConfigHash: string;
   marketplaceRoot: string;
 }
@@ -82,6 +88,14 @@ export async function installRouter(options: {
   }
   const initialText = await readCodexConfig(paths.codexConfigFile);
   const previousState = await readInstallState(paths);
+  const providerId = inspectRootModelProvider(initialText);
+  if (!providerId) throw new Error("Codex root model_provider is missing; model traffic cannot be routed safely.");
+  const providerConfig = inspectModelProviderConfig(initialText, providerId);
+  if (providerConfig.wireApi !== "responses" || providerConfig.requiresOpenAiAuth !== true) {
+    throw new Error(
+      `Active model provider '${providerId}' is not a ChatGPT-authenticated Responses provider.`,
+    );
+  }
   const original = previousState?.original ?? inspectRootConfig(initialText);
   const backupFile = previousState?.backupFile ?? (await backupConfig(paths.codexConfigFile, paths.backupDir));
   const wasRunning = Boolean(await getHealth(paths));
@@ -98,17 +112,23 @@ export async function installRouter(options: {
     const routerConfig = await readRouterConfig(paths);
     const localBase = `http://${routerConfig.listenHost}:${routerConfig.listenPort}/backend-api/codex`;
     const currentText = await readCodexConfig(paths.codexConfigFile);
-    const { editedText } = editRootConfig(currentText, {
+    const rootEdit = editRootConfig(currentText, {
       chatgptBaseUrl: localBase,
       disableResponseStorage: true,
     });
+    const providerEdit = editModelProviderBaseUrl(rootEdit.editedText, providerId, localBase);
+    const editedText = providerEdit.editedText;
     await writeCodexConfig(paths.codexConfigFile, editedText);
     const state: InstallState = {
-      version: 1,
+      version: 2,
       installedAt: previousState?.installedAt ?? new Date().toISOString(),
       codexDesktopVersion: detectedVersion,
       backupFile,
       original,
+      providerId,
+      ...(providerEdit.originalBaseUrl !== undefined
+        ? { originalProviderBaseUrl: providerEdit.originalBaseUrl }
+        : {}),
       installedConfigHash: contentHash(editedText),
       marketplaceRoot: sourceTree.repoRoot,
     };
@@ -157,7 +177,15 @@ export async function uninstallRouter(options: {
     if (contentHash(currentText) === state.installedConfigHash && (await pathExists(state.backupFile))) {
       await copyFile(state.backupFile, paths.codexConfigFile);
     } else {
-      await writeCodexConfig(paths.codexConfigFile, restoreRootConfig(currentText, state.original));
+      let restoredText = restoreRootConfig(currentText, state.original);
+      if (state.providerId) {
+        restoredText = restoreModelProviderBaseUrl(
+          restoredText,
+          state.providerId,
+          state.originalProviderBaseUrl,
+        );
+      }
+      await writeCodexConfig(paths.codexConfigFile, restoredText);
     }
     restored = true;
   }
