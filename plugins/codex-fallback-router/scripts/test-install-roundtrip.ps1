@@ -52,12 +52,34 @@ requires_openai_auth = true
     if (-not (Test-Path -LiteralPath $runtimeNode)) { throw 'Codex-named daemon runtime was not installed.' }
     $installedStatus = & (Join-Path $testHome '.local\bin\codex-fallback.cmd') status | ConvertFrom-Json
     if (-not $installedStatus.ok) { throw 'Installed command shim could not reach the daemon.' }
+    $installedCommand = Join-Path $testHome '.local\bin\codex-fallback.cmd'
+
+    & $installedCommand mode fallback
+    if ($LASTEXITCODE -ne 0) { throw 'Manual fallback mode failed.' }
+    $fallbackHealth = & $installedCommand status | ConvertFrom-Json
+    if ($fallbackHealth.routingMode -ne 'fallback' -or $fallbackHealth.mode -ne 'fallback') {
+        throw 'Fallback mode was not reported as active.'
+    }
+    & $installedCommand stop | Out-Null
+    & $installedCommand start | Out-Null
+    $restartedHealth = & $installedCommand status | ConvertFrom-Json
+    if ($restartedHealth.routingMode -ne 'fallback') { throw 'Routing mode did not survive a daemon restart.' }
+    & $installedCommand mode auto
+    $autoHealth = & $installedCommand status | ConvertFrom-Json
+    if ($autoHealth.routingMode -ne 'auto') { throw 'Auto mode command failed.' }
+    & $installedCommand mode fallback | Out-Null
 
     'replacement-dpapi-credential-for-install-test' |
         node dist/cli.mjs config set --base-url https://fallback.example.invalid --api-key-stdin --port $testPort
     if ($LASTEXITCODE -ne 0) { throw 'Live configuration update failed.' }
     $secondHealth = node dist/cli.mjs status | ConvertFrom-Json
     if (-not $secondHealth.ok) { throw 'Daemon did not restart after configuration change.' }
+    if ($secondHealth.routingMode -ne 'fallback') { throw 'Configuration update did not preserve routing mode.' }
+    & $installedCommand mode primary
+    $primaryHealth = & $installedCommand status | ConvertFrom-Json
+    if ($primaryHealth.routingMode -ne 'primary' -or $primaryHealth.mode -ne 'primary') {
+        throw 'Primary mode was not reported as active.'
+    }
 
     $secretFile = Join-Path $testLocal 'codex-fallback-router\secret.dpapi'
     if ((Get-Content -LiteralPath $secretFile -Raw) -match 'credential-for-install-test') {
@@ -69,6 +91,8 @@ requires_openai_auth = true
     $after = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $testCodex 'config.toml')).Hash
     if ($before -ne $after) { throw 'Uninstall did not restore the original Codex config.' }
     if (Test-Path -LiteralPath $runtimeNode) { throw 'Uninstall left the Codex-named daemon runtime behind.' }
+    $uninstalledRouterConfig = Get-Content -LiteralPath (Join-Path $testLocal 'codex-fallback-router\config.json') -Raw | ConvertFrom-Json
+    if ($uninstalledRouterConfig.routingMode -ne 'auto') { throw 'Uninstall did not reset routing mode to auto.' }
 
     'port-conflict-test-credential-value' |
         node dist/cli.mjs config set --base-url https://example.invalid --api-key-stdin

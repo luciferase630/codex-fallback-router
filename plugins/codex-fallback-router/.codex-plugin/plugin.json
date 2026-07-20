@@ -1,7 +1,7 @@
 {
   "name": "codex-fallback-router",
-  "version": "0.1.0",
-  "description": "Routes Codex Desktop requests to a configured Responses API after a confirmed ChatGPT usage-limit error.",
+  "version": "0.2.0",
+  "description": "Routes Codex Desktop model requests through automatic, fallback, or primary modes.",
   "author": {
     "name": "luciferase630"
   },
@@ -15,8 +15,8 @@
   "hooks": "./hooks.json",
   "interface": {
     "displayName": "Codex Fallback Router",
-    "shortDescription": "Automatic Responses API fallback for Codex Desktop",
-    "longDescription": "Runs a local loopback router that preserves the active Codex model and retries a turn against a configured Responses API only after a confirmed ChatGPT usage-limit error.",
+    "shortDescription": "Automatic or manual Responses API routing for Codex Desktop",
+    "longDescription": "Runs a local loopback router that preserves the active Codex model and supports automatic quota failover plus persistent manual fallback or primary routing modes.",
     "developerName": "luciferase630",
     "category": "Developer",
     "capabilities": [

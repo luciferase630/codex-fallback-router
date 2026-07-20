@@ -10,6 +10,8 @@ import {
 import { atomicWriteFile, pathExists } from "./file-utils.js";
 import type { AppPaths } from "./paths.js";
 
+export type RoutingMode = "auto" | "fallback" | "primary";
+
 export interface RouterConfig {
   version: number;
   fallbackBaseUrl: string;
@@ -19,7 +21,14 @@ export interface RouterConfig {
   listenPort: number;
   officialBaseUrl: string;
   latchMinutes: number;
+  routingMode: RoutingMode;
   upstreamProxyUrl?: string;
+}
+
+export function normalizeRoutingMode(raw: unknown): RoutingMode {
+  if (raw === undefined) return "auto";
+  if (raw === "auto" || raw === "fallback" || raw === "primary") return raw;
+  throw new Error("Routing mode must be one of: auto, fallback, primary.");
 }
 
 export function normalizeBaseUrl(raw: string): string {
@@ -83,6 +92,7 @@ export function createRouterConfig(options: {
   responsesPath?: string;
   fallbackModel?: string;
   listenPort?: number;
+  routingMode?: RoutingMode;
   upstreamProxyUrl?: string;
 }): RouterConfig {
   const fallbackBaseUrl = normalizeBaseUrl(options.baseUrl);
@@ -100,6 +110,7 @@ export function createRouterConfig(options: {
     listenPort,
     officialBaseUrl: OFFICIAL_CHATGPT_BASE_URL,
     latchMinutes: DEFAULT_LATCH_MINUTES,
+    routingMode: normalizeRoutingMode(options.routingMode),
     ...(options.upstreamProxyUrl
       ? { upstreamProxyUrl: normalizeUpstreamProxyUrl(options.upstreamProxyUrl) }
       : {}),
@@ -108,6 +119,19 @@ export function createRouterConfig(options: {
 
 export async function writeRouterConfig(paths: AppPaths, config: RouterConfig): Promise<void> {
   await atomicWriteFile(paths.configFile, `${JSON.stringify(config, null, 2)}\n`);
+}
+
+export async function updateRoutingMode(
+  paths: AppPaths,
+  rawMode: unknown,
+  beforeWrite?: () => Promise<unknown>,
+): Promise<RoutingMode> {
+  const routingMode = normalizeRoutingMode(rawMode);
+  await readRouterConfig(paths);
+  if (beforeWrite) await beforeWrite();
+  const latestConfig = await readRouterConfig(paths);
+  await writeRouterConfig(paths, { ...latestConfig, routingMode });
+  return routingMode;
 }
 
 export async function readRouterConfig(paths: AppPaths): Promise<RouterConfig> {
@@ -128,8 +152,9 @@ export async function readRouterConfig(paths: AppPaths): Promise<RouterConfig> {
   }
   normalizeBaseUrl(parsed.fallbackBaseUrl);
   normalizeResponsesPath(parsed.fallbackResponsesPath, parsed.fallbackBaseUrl);
+  const routingMode = normalizeRoutingMode(parsed.routingMode);
   if (parsed.upstreamProxyUrl !== undefined) normalizeUpstreamProxyUrl(parsed.upstreamProxyUrl);
-  return parsed as RouterConfig;
+  return { ...(parsed as Omit<RouterConfig, "routingMode">), routingMode };
 }
 
 export function fallbackResponsesUrl(config: RouterConfig): URL {

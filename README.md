@@ -1,8 +1,8 @@
 # Codex Fallback Router
 
-An experimental, no-GUI fallback router for Codex Desktop on Windows. It keeps Codex on the official ChatGPT backend during normal operation and retries a Responses API request through a configured provider only after a strong usage-limit signal is received before any visible response content.
+An experimental, no-GUI fallback router for Codex Desktop on Windows. It supports automatic quota failover plus persistent manual fallback and primary routing modes while keeping ChatGPT account services connected.
 
-中文简介：这是一个面向 Windows Codex Desktop 的本地备用路由插件。正常请求仍走 ChatGPT；只有确认 Plus 或工作区额度耗尽、且当前回复尚未输出可见内容时，才把同一条请求重试到用户配置的 Responses API。
+中文简介：这是一个面向 Windows Codex Desktop 的本地备用路由插件，支持额度耗尽自动切换，以及持久化的手动备用、强制官方三种模式；账号和非模型接口始终保留在官方 ChatGPT 登录态。
 
 > [!IMPORTANT]
 > This project is not an OpenAI product. It changes a Codex backend routing setting and sends the active task context to a third-party provider during failover. Review the threat model and provider terms before installing it.
@@ -20,7 +20,8 @@ Versions other than the tested build are rejected unless the operator explicitly
 
 ## What it guarantees
 
-- Normal Responses requests go to the official ChatGPT backend first.
+- In `auto` mode, normal Responses requests go to the official ChatGPT backend first.
+- Manual `fallback` mode sends new Responses requests directly to the configured provider; manual `primary` mode disables automatic failover.
 - Non-model Codex backend routes always go only to the official backend.
 - Failover occurs only for recognized Plus/workspace usage-exhaustion errors, not generic rate limits, authentication errors, network failures, or server errors.
 - If the primary stream has already emitted a non-quota event, the router continues that stream and never creates a duplicate fallback reply.
@@ -75,6 +76,9 @@ After installation, the shim is placed in `%USERPROFILE%\.local\bin`, the same l
 
 ```text
 codex-fallback config set --base-url <https-url> (--api-key-stdin | --reuse-api-key) [--responses-path <path>] [--fallback-model <id>] [--port <port>] [--upstream-proxy <url>]
+codex-fallback mode auto
+codex-fallback mode fallback [--check]
+codex-fallback mode primary
 codex-fallback install [--allow-untested-version]
 codex-fallback start [--quiet]
 codex-fallback stop
@@ -99,18 +103,27 @@ On Windows, proxy-enabled installation copies the current Node runtime outside t
 
 Use `--reuse-api-key` for later non-secret URL, path, model, port, or proxy changes when a DPAPI credential already exists.
 
+Routing modes are one-line, persistent changes that apply to the next new model request without restarting the daemon or interrupting an in-flight response:
+
+```powershell
+codex-fallback mode fallback
+codex-fallback mode primary
+codex-fallback mode auto
+```
+
+`fallback` routes only Responses model requests to the configured provider; ChatGPT account and other non-model routes remain on the official backend. Add `--check` to verify the fallback Responses API before changing mode. `primary` never fails over, even for a quota error. `auto` restores the default official-first quota behavior. `status` reports both the configured `routingMode` and the currently effective provider in `mode`.
+
 ## Failover policy
 
 ```text
 Codex request
   -> local loopback router
-     -> official ChatGPT backend
+     -> manual fallback: validate portable context and use fallback directly
+     -> manual primary: use official ChatGPT and return its response unchanged
+     -> auto: use official ChatGPT first
         -> success or ordinary error: return unchanged
         -> visible SSE output: continue official stream only
-        -> confirmed usage exhaustion before output: activate fallback latch
-           -> validate portable context
-           -> strip official credentials and scoped references
-           -> retry once at the fallback Responses API
+        -> confirmed usage exhaustion before output: activate fallback latch and retry once
 ```
 
 If the official error includes a future reset time, the router uses fallback until that time. Otherwise it latches for 15 minutes, then probes the official service again.
@@ -156,6 +169,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/RELEASING.md](docs/RELEASING.md
 - A failed fallback returns one sanitized error; it does not retry repeatedly or switch models automatically.
 - The project cannot guarantee third-party uptime, model compatibility, account-history access, or future Codex compatibility.
 - A real quota-exhaustion event is difficult to reproduce safely. Mock integration coverage and a direct provider smoke test validate different parts of the system; both are required.
+- Manual mode changes are sampled at the start of each new Responses request; an already-running response continues on its original provider.
 
 ## License
 

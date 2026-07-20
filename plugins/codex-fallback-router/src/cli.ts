@@ -1,7 +1,14 @@
 import { readFile } from "node:fs/promises";
 
 import { CLI_NAME, VERSION } from "./constants.js";
-import { createRouterConfig, writeRouterConfig } from "./config.js";
+import {
+  createRouterConfig,
+  normalizeRoutingMode,
+  readRouterConfig,
+  updateRoutingMode,
+  writeRouterConfig,
+  type RoutingMode,
+} from "./config.js";
 import { readApiKey, storeApiKey } from "./dpapi.js";
 import { getHealth, runDaemon, startDaemon, stopDaemon } from "./daemon.js";
 import { installRouter, uninstallRouter } from "./install.js";
@@ -67,6 +74,9 @@ function printHelp(): void {
 
 Usage:
   ${CLI_NAME} config set --base-url <https-url> (--api-key-stdin | --reuse-api-key) [--responses-path <path>] [--fallback-model <id>] [--upstream-proxy <url>]
+  ${CLI_NAME} mode auto
+  ${CLI_NAME} mode fallback [--check]
+  ${CLI_NAME} mode primary
   ${CLI_NAME} install [--allow-untested-version]
   ${CLI_NAME} start [--quiet]
   ${CLI_NAME} stop
@@ -74,6 +84,14 @@ Usage:
   ${CLI_NAME} smoke-test [--model <id>]
   ${CLI_NAME} uninstall [--keep-secret]
 `);
+}
+
+async function existingRoutingMode(): Promise<RoutingMode> {
+  try {
+    return (await readRouterConfig(getAppPaths())).routingMode;
+  } catch {
+    return "auto";
+  }
 }
 
 async function handleConfigSet(args: ParsedArgs): Promise<void> {
@@ -88,14 +106,15 @@ async function handleConfigSet(args: ParsedArgs): Promise<void> {
   const responsesPath = stringFlag(args, "responses-path");
   const fallbackModel = stringFlag(args, "fallback-model");
   const upstreamProxyUrl = stringFlag(args, "upstream-proxy");
+  const paths = getAppPaths();
   const config = createRouterConfig({
     baseUrl,
     ...(responsesPath ? { responsesPath } : {}),
     ...(fallbackModel ? { fallbackModel } : {}),
     ...(portRaw ? { listenPort: Number.parseInt(portRaw, 10) } : {}),
+    routingMode: await existingRoutingMode(),
     ...(upstreamProxyUrl ? { upstreamProxyUrl } : {}),
   });
-  const paths = getAppPaths();
   if (reuseApiKey) await readApiKey(paths);
   const secret = keyFromStdin ? await readStdin() : undefined;
   const wasRunning = await getHealth(paths);
@@ -121,6 +140,26 @@ async function handleConfigSet(args: ParsedArgs): Promise<void> {
   console.log(`Configuration saved for ${new URL(config.fallbackBaseUrl).origin}; API key stored with DPAPI.`);
 }
 
+async function handleMode(args: ParsedArgs): Promise<void> {
+  if (!args.subcommand) throw new Error("Routing mode is required: auto, fallback, or primary.");
+  const routingMode = normalizeRoutingMode(args.subcommand);
+  const shouldCheck = booleanFlag(args, "check");
+  if (shouldCheck && routingMode !== "fallback") {
+    throw new Error("--check is only supported with 'mode fallback'.");
+  }
+  const paths = getAppPaths();
+  await updateRoutingMode(
+    paths,
+    routingMode,
+    shouldCheck ? async () => runConfiguredSmokeTest({ paths }) : undefined,
+  );
+  console.log(
+    routingMode === "fallback"
+      ? `Routing mode set to fallback${shouldCheck ? " after a successful provider check" : ""}. ChatGPT account services remain connected.`
+      : `Routing mode set to ${routingMode}.`,
+  );
+}
+
 async function main(): Promise<void> {
   assertNodeVersion();
   const args = parseArgs(process.argv.slice(2));
@@ -134,6 +173,10 @@ async function main(): Promise<void> {
   }
   if (args.command === "config" && args.subcommand === "set") {
     await handleConfigSet(args);
+    return;
+  }
+  if (args.command === "mode") {
+    await handleMode(args);
     return;
   }
   if (args.command === "install") {

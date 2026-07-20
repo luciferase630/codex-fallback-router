@@ -1,6 +1,6 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
-import { PLUGIN_ID, PLUGIN_NAME } from "./constants.js";
+import { PLUGIN_ID, PLUGIN_NAME, VERSION } from "./constants.js";
 import { spawnCodex } from "./platform.js";
 
 interface PendingRequest {
@@ -88,7 +88,7 @@ class AppServerClient {
 
   async initialize(): Promise<void> {
     await this.request("initialize", {
-      clientInfo: { name: "codex-fallback-router-installer", version: "0.1.0" },
+      clientInfo: { name: "codex-fallback-router-installer", version: VERSION },
       capabilities: { experimentalApi: true },
     });
     this.notify("initialized");
@@ -131,4 +131,3 @@ export async function uninstallLocalPlugin(): Promise<void> {
     await client.close();
   }
 }
-

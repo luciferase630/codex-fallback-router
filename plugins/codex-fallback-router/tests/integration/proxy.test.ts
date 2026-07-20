@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 
-import type { RouterConfig } from "../../src/config.js";
+import type { RouterConfig, RoutingMode } from "../../src/config.js";
 import { SafeLogger } from "../../src/logger.js";
 import { createRouterServer } from "../../src/proxy.js";
 
@@ -59,16 +59,19 @@ async function createHarness(
   t: TestContext,
   primaryHandler: (request: IncomingMessage, response: ServerResponse) => void,
   fallbackHandler: (request: IncomingMessage, response: ServerResponse) => void,
+  initialRoutingMode: RoutingMode = "auto",
 ): Promise<{
   routerOrigin: string;
   logFile: string;
   apiKey: string;
+  setRoutingMode: (mode: RoutingMode) => void;
 }> {
   const root = await mkdtemp(join(tmpdir(), "codex-fallback-proxy-"));
   const primary = await listen(http.createServer(primaryHandler));
   const fallback = await listen(http.createServer(fallbackHandler));
   const logFile = join(root, "router.log");
   const apiKey = ["fallback", "credential", "x".repeat(32)].join("-");
+  let routingMode = initialRoutingMode;
   const config: RouterConfig = {
     version: 1,
     fallbackBaseUrl: fallback.origin,
@@ -77,6 +80,7 @@ async function createHarness(
     listenPort: 45831,
     officialBaseUrl: `${primary.origin}/backend-api/codex`,
     latchMinutes: 15,
+    routingMode,
   };
   const logger = new SafeLogger(logFile);
   await logger.initialize();
@@ -84,14 +88,26 @@ async function createHarness(
     config,
     apiKey,
     logger,
-    health: () => ({ ok: true }),
+    getRoutingMode: () => routingMode,
+    health: (configuredMode, activeProvider) => ({
+      ok: true,
+      routingMode: configuredMode,
+      mode: activeProvider,
+    }),
   });
   const router = await listen(runtime.server);
   t.after(async () => {
     await Promise.all([close(router.server), close(primary.server), close(fallback.server)]);
     await rm(root, { recursive: true, force: true });
   });
-  return { routerOrigin: router.origin, logFile, apiKey };
+  return {
+    routerOrigin: router.origin,
+    logFile,
+    apiKey,
+    setRoutingMode: (mode) => {
+      routingMode = mode;
+    },
+  };
 }
 
 async function postResponses(
@@ -134,6 +150,102 @@ test("primary success never calls fallback", async (t) => {
   assert.match(await response.text(), /response.completed/);
   assert.equal(primaryCalls, 1);
   assert.equal(fallbackCalls, 0);
+});
+
+test("manual fallback skips primary and preserves portable context without ChatGPT credentials", async (t) => {
+  let primaryCalls = 0;
+  let fallbackCalls = 0;
+  let receivedBody: Record<string, unknown> | undefined;
+  let fallbackAuthorization = "";
+  let fallbackCookie: string | undefined;
+  let fallbackAccount: string | undefined;
+  const harness = await createHarness(
+    t,
+    (_request, response) => {
+      primaryCalls += 1;
+      response.end();
+    },
+    (request, response) => {
+      fallbackCalls += 1;
+      fallbackAuthorization = String(request.headers.authorization ?? "");
+      fallbackCookie = request.headers.cookie;
+      fallbackAccount = request.headers["chatgpt-account-id"] as string | undefined;
+      void readBody(request).then((body) => {
+        receivedBody = JSON.parse(body.toString("utf8")) as Record<string, unknown>;
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end("data: {\"type\":\"response.completed\",\"provider\":\"fallback\"}\n\n");
+      });
+    },
+    "fallback",
+  );
+
+  const response = await postResponses(harness.routerOrigin);
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /fallback/);
+  assert.equal(primaryCalls, 0);
+  assert.equal(fallbackCalls, 1);
+  assert.equal(fallbackAuthorization, `Bearer ${harness.apiKey}`);
+  assert.equal(fallbackCookie, undefined);
+  assert.equal(fallbackAccount, undefined);
+  assert.equal(receivedBody?.model, "current-model");
+  assert.equal(receivedBody?.store, false);
+  assert.deepEqual(receivedBody?.input, portableRequest().input);
+  assert.deepEqual(receivedBody?.tools, portableRequest().tools);
+
+  const health = await fetch(`${harness.routerOrigin}/_codex-fallback/health`).then((value) => value.json());
+  assert.deepEqual(health, { ok: true, routingMode: "fallback", mode: "fallback" });
+});
+
+test("manual primary returns quota exhaustion without calling fallback", async (t) => {
+  let primaryCalls = 0;
+  let fallbackCalls = 0;
+  const harness = await createHarness(
+    t,
+    (_request, response) => {
+      primaryCalls += 1;
+      response.writeHead(429, { "content-type": "application/json" });
+      response.end(quotaBody());
+    },
+    (_request, response) => {
+      fallbackCalls += 1;
+      response.end();
+    },
+    "primary",
+  );
+
+  const response = await postResponses(harness.routerOrigin);
+  assert.equal(response.status, 429);
+  assert.match(await response.text(), /usage_limit_exceeded/);
+  assert.equal(primaryCalls, 1);
+  assert.equal(fallbackCalls, 0);
+});
+
+test("routing mode is fixed for an in-flight stream and changes on the next request", async (t) => {
+  let primaryCalls = 0;
+  let fallbackCalls = 0;
+  const harness = await createHarness(
+    t,
+    (_request, response) => {
+      primaryCalls += 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.write("data: {\"provider\":\"primary\",\"delta\":\"started\"}\n\n");
+      setTimeout(() => response.end("data: {\"type\":\"response.completed\"}\n\n"), 50);
+    },
+    (_request, response) => {
+      fallbackCalls += 1;
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end("data: {\"provider\":\"fallback\",\"type\":\"response.completed\"}\n\n");
+    },
+    "primary",
+  );
+
+  const first = await postResponses(harness.routerOrigin);
+  harness.setRoutingMode("fallback");
+  const second = await postResponses(harness.routerOrigin);
+  assert.match(await first.text(), /primary/);
+  assert.match(await second.text(), /fallback/);
+  assert.equal(primaryCalls, 1);
+  assert.equal(fallbackCalls, 1);
 });
 
 test("strong quota failure retries once on fallback and latches future requests", async (t) => {
@@ -322,6 +434,7 @@ test("network failure on primary does not send context to fallback", async (t) =
     listenPort: 45831,
     officialBaseUrl: `${unavailableOrigin}/backend-api/codex`,
     latchMinutes: 15,
+    routingMode: "auto",
   };
   const logger = new SafeLogger(join(root, "router.log"));
   await logger.initialize();
@@ -339,13 +452,17 @@ test("network failure on primary does not send context to fallback", async (t) =
   assert.equal(fallbackCalls, 0);
 });
 
-test("non-model routes always pass through only to the official backend", async (t) => {
-  let primaryPath = "";
+test("non-model routes keep official authentication in every routing mode", async (t) => {
+  const primaryPaths: string[] = [];
   let fallbackCalls = 0;
+  let officialAuthorization = "";
+  let officialCookie = "";
   const harness = await createHarness(
     t,
     (request, response) => {
-      primaryPath = request.url ?? "";
+      primaryPaths.push(request.url ?? "");
+      officialAuthorization = String(request.headers.authorization ?? "");
+      officialCookie = String(request.headers.cookie ?? "");
       response.writeHead(200, { "content-type": "application/json" });
       response.end(JSON.stringify({ source: "primary" }));
     },
@@ -354,10 +471,18 @@ test("non-model routes always pass through only to the official backend", async 
       response.end();
     },
   );
-  const response = await fetch(`${harness.routerOrigin}/backend-api/codex/models?view=all`, {
-    headers: { authorization: "Bearer primary-session-token" },
-  });
-  assert.deepEqual(await response.json(), { source: "primary" });
-  assert.equal(primaryPath, "/backend-api/codex/models?view=all");
+  for (const mode of ["auto", "fallback", "primary"] as const) {
+    harness.setRoutingMode(mode);
+    const response = await fetch(`${harness.routerOrigin}/backend-api/codex/models?view=all`, {
+      headers: {
+        authorization: "Bearer primary-session-token",
+        cookie: "session=primary",
+      },
+    });
+    assert.deepEqual(await response.json(), { source: "primary" });
+  }
+  assert.deepEqual(primaryPaths, Array(3).fill("/backend-api/codex/models?view=all"));
+  assert.equal(officialAuthorization, "Bearer primary-session-token");
+  assert.equal(officialCookie, "session=primary");
   assert.equal(fallbackCalls, 0);
 });

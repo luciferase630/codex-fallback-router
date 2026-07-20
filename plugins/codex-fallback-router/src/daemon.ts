@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { readFile, rm } from "node:fs/promises";
 
 import { VERSION } from "./constants.js";
-import { readRouterConfig } from "./config.js";
+import { normalizeRoutingMode, readRouterConfig, type RoutingMode } from "./config.js";
 import { readApiKey } from "./dpapi.js";
 import { atomicWriteFile, pathExists } from "./file-utils.js";
 import { SafeLogger } from "./logger.js";
@@ -40,6 +40,7 @@ export interface HealthStatus {
   pid: number;
   version: string;
   mode: "primary" | "fallback";
+  routingMode: RoutingMode;
   fallbackUntil?: string;
 }
 
@@ -57,7 +58,12 @@ export async function getHealth(paths: AppPaths = getAppPaths()): Promise<Health
     );
     if (!response.ok) return undefined;
     const parsed = (await response.json()) as Partial<HealthStatus>;
-    return parsed.ok === true && typeof parsed.pid === "number" ? (parsed as HealthStatus) : undefined;
+    if (
+      parsed.ok !== true ||
+      typeof parsed.pid !== "number" ||
+      (parsed.mode !== "primary" && parsed.mode !== "fallback")
+    ) return undefined;
+    return { ...(parsed as HealthStatus), routingMode: normalizeRoutingMode(parsed.routingMode) };
   } catch {
     return undefined;
   }
@@ -72,12 +78,16 @@ export async function runDaemon(paths: AppPaths = getAppPaths()): Promise<void> 
     config,
     apiKey,
     logger,
-    health: () => ({
+    getRoutingMode: async () => (await readRouterConfig(paths)).routingMode,
+    health: (routingMode, activeProvider) => ({
       ok: true,
       pid: process.pid,
       version: VERSION,
-      mode: runtime.latch.isActive() ? "fallback" : "primary",
-      ...(runtime.latch.until ? { fallbackUntil: new Date(runtime.latch.until).toISOString() } : {}),
+      mode: activeProvider,
+      routingMode,
+      ...(routingMode === "auto" && runtime.latch.until
+        ? { fallbackUntil: new Date(runtime.latch.until).toISOString() }
+        : {}),
     }),
   });
   await new Promise<void>((resolve, reject) => {

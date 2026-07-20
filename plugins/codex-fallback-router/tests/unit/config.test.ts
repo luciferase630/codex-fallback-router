@@ -20,10 +20,30 @@ import {
   fallbackResponsesUrl,
   normalizeBaseUrl,
   normalizeResponsesPath,
+  normalizeRoutingMode,
   normalizeUpstreamProxyUrl,
+  readRouterConfig,
+  updateRoutingMode,
+  writeRouterConfig,
 } from "../../src/config.js";
 import { readApiKey, storeApiKey, validateApiKey } from "../../src/dpapi.js";
 import type { AppPaths } from "../../src/paths.js";
+
+function testPaths(root: string): AppPaths {
+  return {
+    runtimeDir: root,
+    secretFile: join(root, "secret.dpapi"),
+    configFile: join(root, "config.json"),
+    stateFile: join(root, "state.json"),
+    pidFile: join(root, "pid.json"),
+    logFile: join(root, "router.log"),
+    backupDir: join(root, "backups"),
+    runtimeCli: join(root, "bin", "cli.mjs"),
+    runtimeNode: join(root, "bin", "codex.exe"),
+    commandShim: join(root, "bin", "codex-fallback.cmd"),
+    codexConfigFile: join(root, "config.toml"),
+  };
+}
 
 test("normalizes fallback roots and Responses API paths", () => {
   assert.equal(normalizeBaseUrl(" https://example.test/// "), "https://example.test");
@@ -45,9 +65,45 @@ test("accepts only credential-free loopback HTTP CONNECT proxies", () => {
   assert.throws(() => normalizeUpstreamProxyUrl("http://user:pass@127.0.0.1:7890"), /credentials/);
 });
 
+test("defaults legacy configuration to auto and validates routing modes", async (t) => {
+  assert.equal(normalizeRoutingMode(undefined), "auto");
+  assert.equal(normalizeRoutingMode("fallback"), "fallback");
+  assert.equal(normalizeRoutingMode("primary"), "primary");
+  assert.throws(() => normalizeRoutingMode("invalid"), /auto, fallback, primary/);
+
+  const root = await mkdtemp(join(tmpdir(), "codex-fallback-mode-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const paths = testPaths(root);
+  const legacy = createRouterConfig({ baseUrl: "https://example.test" });
+  const { routingMode: _routingMode, ...legacyWithoutMode } = legacy;
+  await writeFile(paths.configFile, `${JSON.stringify(legacyWithoutMode)}\n`, "utf8");
+  assert.equal((await readRouterConfig(paths)).routingMode, "auto");
+
+  await writeFile(paths.configFile, `${JSON.stringify({ ...legacyWithoutMode, routingMode: "bad" })}\n`, "utf8");
+  await assert.rejects(readRouterConfig(paths), /auto, fallback, primary/);
+});
+
+test("updates routing mode atomically and leaves it unchanged when a check fails", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-fallback-mode-update-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const paths = testPaths(root);
+  await writeRouterConfig(paths, createRouterConfig({ baseUrl: "https://example.test" }));
+
+  await updateRoutingMode(paths, "fallback");
+  assert.equal((await readRouterConfig(paths)).routingMode, "fallback");
+  await assert.rejects(
+    updateRoutingMode(paths, "primary", async () => {
+      throw new Error("provider check failed");
+    }),
+    /provider check failed/,
+  );
+  assert.equal((await readRouterConfig(paths)).routingMode, "fallback");
+});
+
 test("preserves the requested model unless an override is explicit", () => {
   const transparent = createRouterConfig({ baseUrl: "https://example.test" });
   assert.equal(transparent.fallbackModel, undefined);
+  assert.equal(transparent.routingMode, "auto");
   assert.equal(fallbackResponsesUrl(transparent).href, "https://example.test/v1/responses");
 
   const mapped = createRouterConfig({
@@ -128,19 +184,7 @@ test("DPAPI protects and restores the API key for the current Windows user", { s
   const root = await mkdtemp(join(tmpdir(), "codex-fallback-dpapi-"));
   t.after(async () => rm(root, { recursive: true, force: true }));
   const secret = ["test", "credential", crypto.randomUUID().replaceAll("-", "")].join("-");
-  const paths = {
-    runtimeDir: root,
-    secretFile: join(root, "secret.dpapi"),
-    configFile: join(root, "config.json"),
-    stateFile: join(root, "state.json"),
-    pidFile: join(root, "pid.json"),
-    logFile: join(root, "router.log"),
-    backupDir: join(root, "backups"),
-    runtimeCli: join(root, "bin", "cli.mjs"),
-    runtimeNode: join(root, "bin", "codex.exe"),
-    commandShim: join(root, "bin", "codex-fallback.cmd"),
-    codexConfigFile: join(root, "config.toml"),
-  } satisfies AppPaths;
+  const paths = testPaths(root);
 
   await storeApiKey(paths, secret);
   assert.equal(await readApiKey(paths), secret);

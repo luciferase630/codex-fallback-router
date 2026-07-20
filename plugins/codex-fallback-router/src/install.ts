@@ -19,7 +19,7 @@ import {
   writeCodexConfig,
   type RootConfigValues,
 } from "./codex-config.js";
-import { readRouterConfig } from "./config.js";
+import { readRouterConfig, writeRouterConfig } from "./config.js";
 import { readApiKey } from "./dpapi.js";
 import { getHealth, startDaemon, stopDaemon } from "./daemon.js";
 import { atomicWriteFile, ensureParent, pathExists } from "./file-utils.js";
@@ -185,6 +185,14 @@ export async function uninstallRouter(options: {
 }): Promise<{ restored: boolean }> {
   const paths = options.paths ?? getAppPaths();
   const state = await readInstallState(paths);
+  try {
+    const routerConfig = await readRouterConfig(paths);
+    if (routerConfig.routingMode !== "auto") {
+      await writeRouterConfig(paths, { ...routerConfig, routingMode: "auto" });
+    }
+  } catch {
+    // Continue removal even when a damaged router configuration cannot be normalized.
+  }
   let restored = false;
   if (state && (await pathExists(paths.codexConfigFile))) {
     const currentText = await readCodexConfig(paths.codexConfigFile);

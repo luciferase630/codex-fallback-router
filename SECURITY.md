@@ -21,7 +21,8 @@ The router is designed around these invariants:
 
 - listen only on `127.0.0.1`;
 - send non-model routes only to the fixed official ChatGPT base URL;
-- send a Responses request to fallback only after a strong quota-exhaustion decision or an active quota latch;
+- send a Responses request to fallback only after a strong quota-exhaustion decision, an active quota latch, or an explicit persistent manual fallback selection;
+- keep all non-model routes on the official backend in every routing mode so manual fallback does not replace the ChatGPT login session;
 - never fail over after the primary stream has begun returning non-quota events;
 - block failover for server-scoped history references;
 - remove ChatGPT/OpenAI credentials and scoped headers before fallback;

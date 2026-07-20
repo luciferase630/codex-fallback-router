@@ -8,7 +8,7 @@ import http, {
 import https from "node:https";
 import { once } from "node:events";
 
-import { fallbackResponsesUrl, type RouterConfig } from "./config.js";
+import { fallbackResponsesUrl, type RouterConfig, type RoutingMode } from "./config.js";
 import { prepareFallbackRequestBody } from "./context.js";
 import {
   fallbackRequestHeaders,
@@ -157,14 +157,21 @@ export interface RouterRuntime {
   latch: QuotaLatch;
 }
 
+type ActiveProvider = "primary" | "fallback";
+
 export async function createRouterServer(options: {
   config: RouterConfig;
   apiKey: string;
   logger: SafeLogger;
-  health: () => Record<string, unknown>;
+  getRoutingMode?: () => RoutingMode | Promise<RoutingMode>;
+  health: (
+    routingMode: RoutingMode,
+    activeProvider: ActiveProvider,
+  ) => Record<string, unknown> | Promise<Record<string, unknown>>;
 }): Promise<RouterRuntime> {
   const { config, apiKey, logger } = options;
   const latch = new QuotaLatch(config.latchMinutes * 60_000);
+  const getRoutingMode = options.getRoutingMode ?? (() => config.routingMode);
 
   async function proxyPassthrough(request: IncomingMessage, response: ServerResponse): Promise<void> {
     const target = officialTarget(config, request.url);
@@ -240,7 +247,49 @@ export async function createRouterServer(options: {
         provider: "fallback",
         durationMs: Date.now() - started,
       });
-      writeError(response, 502, "fallback_unreachable", "Fallback Responses API is unreachable.");
+      if (!response.headersSent) {
+        writeError(response, 502, "fallback_unreachable", "Fallback Responses API is unreachable.");
+      } else {
+        response.destroy();
+      }
+    }
+  }
+
+  async function sendPrimary(
+    request: IncomingMessage,
+    response: ServerResponse,
+    body: Buffer,
+    requestId: string,
+  ): Promise<void> {
+    const started = Date.now();
+    try {
+      const upstream = await openUpstreamRequest({
+        target: officialTarget(config, request.url),
+        method: request.method ?? "POST",
+        headers: { ...primaryRequestHeaders(request.headers), "content-length": body.length },
+        body,
+        ...(config.upstreamProxyUrl ? { proxyUrl: config.upstreamProxyUrl } : {}),
+      });
+      await logger.write({
+        event: "upstream_response",
+        requestId,
+        provider: "primary",
+        ...(upstream.statusCode !== undefined ? { status: upstream.statusCode } : {}),
+        durationMs: Date.now() - started,
+      });
+      await streamResponse(response, upstream);
+    } catch {
+      await logger.write({
+        event: "upstream_error",
+        requestId,
+        provider: "primary",
+        durationMs: Date.now() - started,
+      });
+      if (!response.headersSent) {
+        writeError(response, 502, "primary_unreachable", "Official ChatGPT backend is unreachable.");
+      } else {
+        response.destroy();
+      }
     }
   }
 
@@ -251,6 +300,23 @@ export async function createRouterServer(options: {
       body = await readRequestBody(request);
     } catch (error) {
       writeError(response, 413, "request_too_large", (error as Error).message);
+      return;
+    }
+    let routingMode: RoutingMode;
+    try {
+      routingMode = await getRoutingMode();
+    } catch {
+      writeError(response, 500, "routing_mode_invalid", "Routing mode configuration is invalid.");
+      return;
+    }
+    if (routingMode === "fallback") {
+      await logger.write({ event: "manual_route", requestId, provider: "fallback" });
+      await sendFallback(request, response, body, requestId);
+      return;
+    }
+    if (routingMode === "primary") {
+      await logger.write({ event: "manual_route", requestId, provider: "primary" });
+      await sendPrimary(request, response, body, requestId);
       return;
     }
     if (latch.isActive()) {
@@ -354,7 +420,14 @@ export async function createRouterServer(options: {
   const server = http.createServer((request, response) => {
     void (async () => {
       if (request.url === "/_codex-fallback/health") {
-        const body = Buffer.from(JSON.stringify(options.health()), "utf8");
+        const routingMode = await getRoutingMode();
+        const activeProvider: ActiveProvider = routingMode === "auto"
+          ? (latch.isActive() ? "fallback" : "primary")
+          : routingMode;
+        const body = Buffer.from(
+          JSON.stringify(await options.health(routingMode, activeProvider)),
+          "utf8",
+        );
         response.writeHead(200, {
           "content-type": "application/json",
           "content-length": body.length,

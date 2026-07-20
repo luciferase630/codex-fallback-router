@@ -35,6 +35,7 @@ function config(origin: string): RouterConfig {
     listenPort: 45831,
     officialBaseUrl: "https://chatgpt.com/backend-api/codex",
     latchMinutes: 15,
+    routingMode: "auto",
   };
 }
 
