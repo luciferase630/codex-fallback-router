@@ -17,7 +17,7 @@ import {
 } from "./codex-config.js";
 import { readRouterConfig } from "./config.js";
 import { readApiKey } from "./dpapi.js";
-import { startDaemon } from "./daemon.js";
+import { getHealth, startDaemon, stopDaemon } from "./daemon.js";
 import { atomicWriteFile, ensureParent, pathExists } from "./file-utils.js";
 import { detectCodexDesktopVersion, runCodex } from "./platform.js";
 import { installLocalPlugin, uninstallLocalPlugin } from "./plugin-lifecycle.js";
@@ -84,39 +84,63 @@ export async function installRouter(options: {
   const previousState = await readInstallState(paths);
   const original = previousState?.original ?? inspectRootConfig(initialText);
   const backupFile = previousState?.backupFile ?? (await backupConfig(paths.codexConfigFile, paths.backupDir));
+  const wasRunning = Boolean(await getHealth(paths));
+  let pluginInstalled = false;
+  let daemonStarted = false;
   try {
     await registerMarketplace(sourceTree.repoRoot);
     await installLocalPlugin(sourceTree.marketplaceFile);
-  } catch (error) {
-    await copyFile(backupFile, paths.codexConfigFile);
-    throw new Error(`Plugin installation failed; Codex config was restored. ${(error as Error).message}`);
-  }
-  await installRuntimeCli(sourceCli, paths);
-
-  const routerConfig = await readRouterConfig(paths);
-  const localBase = `http://${routerConfig.listenHost}:${routerConfig.listenPort}/backend-api/codex`;
-  const currentText = await readCodexConfig(paths.codexConfigFile);
-  const { editedText } = editRootConfig(currentText, {
-    chatgptBaseUrl: localBase,
-    disableResponseStorage: true,
-  });
-  await writeCodexConfig(paths.codexConfigFile, editedText);
-  const state: InstallState = {
-    version: 1,
-    installedAt: previousState?.installedAt ?? new Date().toISOString(),
-    codexDesktopVersion: detectedVersion,
-    backupFile,
-    original,
-    installedConfigHash: contentHash(editedText),
-    marketplaceRoot: sourceTree.repoRoot,
-  };
-  await atomicWriteFile(paths.stateFile, `${JSON.stringify(state, null, 2)}\n`);
-  try {
+    pluginInstalled = true;
+    await installRuntimeCli(sourceCli, paths);
     await startDaemon({ quiet: true, paths, cliPath: paths.runtimeCli });
+    daemonStarted = !wasRunning;
+
+    const routerConfig = await readRouterConfig(paths);
+    const localBase = `http://${routerConfig.listenHost}:${routerConfig.listenPort}/backend-api/codex`;
+    const currentText = await readCodexConfig(paths.codexConfigFile);
+    const { editedText } = editRootConfig(currentText, {
+      chatgptBaseUrl: localBase,
+      disableResponseStorage: true,
+    });
+    await writeCodexConfig(paths.codexConfigFile, editedText);
+    const state: InstallState = {
+      version: 1,
+      installedAt: previousState?.installedAt ?? new Date().toISOString(),
+      codexDesktopVersion: detectedVersion,
+      backupFile,
+      original,
+      installedConfigHash: contentHash(editedText),
+      marketplaceRoot: sourceTree.repoRoot,
+    };
+    await atomicWriteFile(paths.stateFile, `${JSON.stringify(state, null, 2)}\n`);
   } catch (error) {
-    await copyFile(backupFile, paths.codexConfigFile);
-    await rm(paths.stateFile, { force: true });
-    throw new Error(`Router could not be started; Codex config was restored. ${(error as Error).message}`);
+    if (daemonStarted) {
+      try {
+        await stopDaemon(paths);
+      } catch {
+        // Continue restoring Codex even if the just-started daemon does not stop cleanly.
+      }
+    }
+    await writeCodexConfig(paths.codexConfigFile, initialText);
+    if (previousState) {
+      await atomicWriteFile(paths.stateFile, `${JSON.stringify(previousState, null, 2)}\n`);
+    } else {
+      await rm(paths.stateFile, { force: true });
+      await rm(paths.commandShim, { force: true });
+      await rm(paths.runtimeCli, { force: true });
+      if (pluginInstalled) {
+        try {
+          await uninstallLocalPlugin();
+        } catch {
+          // Best-effort removal continues with the marketplace registration.
+        }
+      }
+      await runCodex(
+        ["-c", 'service_tier="fast"', "plugin", "marketplace", "remove", MARKETPLACE_NAME],
+        { allowFailure: true },
+      );
+    }
+    throw new Error(`Installation failed and was rolled back. ${(error as Error).message}`);
   }
   return { version: detectedVersion, restartRequired: true };
 }

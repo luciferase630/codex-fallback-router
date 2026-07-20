@@ -50,6 +50,17 @@ export function inspectRootConfig(text: string): RootConfigValues {
   return values;
 }
 
+export function inspectRootModel(text: string): string | undefined {
+  for (const line of text.split(/\r?\n/)) {
+    if (/^\s*\[/.test(line)) break;
+    const match = line.match(/^\s*model\s*=\s*(.+?)\s*(?:#.*)?$/);
+    if (!match?.[1]) continue;
+    const value = decodeTomlString(match[1]);
+    if (value?.trim()) return value.trim();
+  }
+  return undefined;
+}
+
 export function editRootConfig(
   text: string,
   desired: { chatgptBaseUrl: string; disableResponseStorage: boolean },
@@ -155,4 +166,3 @@ export async function writeCodexConfig(configFile: string, text: string): Promis
 export async function readCodexConfig(configFile: string): Promise<string> {
   return readFile(configFile, "utf8");
 }
-

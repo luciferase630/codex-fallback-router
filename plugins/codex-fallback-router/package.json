@@ -14,7 +14,11 @@
   "scripts": {
     "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
-    "test": "tsx --test tests/**/*.test.ts",
+    "test": "npm run build && npm run typecheck && npm run test:unit && npm run test:integration && npm run test:secret-scan",
+    "test:unit": "tsx --test tests/unit/**/*.test.ts",
+    "test:integration": "tsx --test tests/integration/**/*.test.ts",
+    "test:install": "powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File scripts/test-install-roundtrip.ps1",
+    "test:secret-scan": "node scripts/scan-secrets.mjs --self-test",
     "secret-scan": "node scripts/scan-secrets.mjs --all"
   },
   "devDependencies": {
@@ -24,4 +28,3 @@
     "typescript": "^5.8.0"
   }
 }
-

@@ -37,7 +37,8 @@ export function fallbackRequestHeaders(
       lower === "content-length" ||
       lower === "origin" ||
       lower === "referer" ||
-      lower === "chatgpt-account-id" ||
+      lower.startsWith("chatgpt-") ||
+      lower.startsWith("x-chatgpt-") ||
       lower.startsWith("x-openai-") ||
       lower.startsWith("openai-")
     ) {
@@ -61,4 +62,3 @@ export function responseHeaders(headers: IncomingHttpHeaders): OutgoingHttpHeade
   }
   return output;
 }
-

@@ -8,6 +8,7 @@ import { installRouter, uninstallRouter } from "./install.js";
 import { assertNodeVersion } from "./platform.js";
 import { getAppPaths } from "./paths.js";
 import { atomicWriteFile } from "./file-utils.js";
+import { runConfiguredSmokeTest } from "./smoke-test.js";
 
 interface ParsedArgs {
   command: string;
@@ -70,7 +71,7 @@ Usage:
   ${CLI_NAME} start [--quiet]
   ${CLI_NAME} stop
   ${CLI_NAME} status
-  ${CLI_NAME} smoke-test
+  ${CLI_NAME} smoke-test [--model <id>]
   ${CLI_NAME} uninstall [--keep-secret]
 `);
 }
@@ -162,7 +163,14 @@ async function main(): Promise<void> {
     return;
   }
   if (args.command === "smoke-test") {
-    throw new Error("Command 'smoke-test' will be enabled by the validation milestone.");
+    const model = stringFlag(args, "model");
+    const result = await runConfiguredSmokeTest({
+      ...(model ? { model } : {}),
+    });
+    console.log(
+      `Fallback smoke test passed (HTTP ${result.status}, model ${result.model}, endpoint ${result.endpoint}).`,
+    );
+    return;
   }
   throw new Error(`Unknown command: ${args.command}`);
 }

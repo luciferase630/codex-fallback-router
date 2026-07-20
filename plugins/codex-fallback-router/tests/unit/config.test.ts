@@ -1,0 +1,100 @@
+import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+
+import {
+  backupConfig,
+  editRootConfig,
+  inspectRootConfig,
+  inspectRootModel,
+  restoreRootConfig,
+} from "../../src/codex-config.js";
+import {
+  createRouterConfig,
+  fallbackResponsesUrl,
+  normalizeBaseUrl,
+  normalizeResponsesPath,
+} from "../../src/config.js";
+import { readApiKey, storeApiKey, validateApiKey } from "../../src/dpapi.js";
+import type { AppPaths } from "../../src/paths.js";
+
+test("normalizes fallback roots and Responses API paths", () => {
+  assert.equal(normalizeBaseUrl(" https://example.test/// "), "https://example.test");
+  assert.equal(normalizeBaseUrl("https://example.test/gateway/v1/"), "https://example.test/gateway/v1");
+  assert.equal(normalizeResponsesPath(undefined, "https://example.test"), "/v1/responses");
+  assert.equal(normalizeResponsesPath(undefined, "https://example.test/v1"), "/responses");
+  assert.equal(normalizeResponsesPath("//custom//responses", "https://example.test"), "/custom/responses");
+
+  assert.throws(() => normalizeBaseUrl("http://example.test"), /HTTPS/);
+  assert.throws(() => normalizeBaseUrl("https://user:pass@example.test"), /credentials/);
+  assert.throws(() => normalizeResponsesPath("responses", "https://example.test"), /start with/);
+});
+
+test("preserves the requested model unless an override is explicit", () => {
+  const transparent = createRouterConfig({ baseUrl: "https://example.test" });
+  assert.equal(transparent.fallbackModel, undefined);
+  assert.equal(fallbackResponsesUrl(transparent).href, "https://example.test/v1/responses");
+
+  const mapped = createRouterConfig({
+    baseUrl: "https://example.test/service/v1",
+    fallbackModel: "fallback-model",
+  });
+  assert.equal(mapped.fallbackModel, "fallback-model");
+  assert.equal(fallbackResponsesUrl(mapped).href, "https://example.test/service/v1/responses");
+});
+
+test("edits and restores only root Codex configuration keys", () => {
+  const original = `model = "gpt-5"\n\n[features]\nplugins = true\n`;
+  const edit = editRootConfig(original, {
+    chatgptBaseUrl: "http://127.0.0.1:45831/backend-api/codex",
+    disableResponseStorage: true,
+  });
+  assert.deepEqual(edit.original, {});
+  assert.deepEqual(inspectRootConfig(edit.editedText), {
+    chatgptBaseUrl: "http://127.0.0.1:45831/backend-api/codex",
+    disableResponseStorage: true,
+  });
+  assert.match(edit.editedText, /\[features\]\nplugins = true/);
+  assert.equal(restoreRootConfig(edit.editedText, edit.original), original);
+});
+
+test("reads only the root model used by Codex", () => {
+  assert.equal(inspectRootModel(`model = "current-model"\n[profile.test]\nmodel = "other"\n`), "current-model");
+  assert.equal(inspectRootModel(`[profile.test]\nmodel = "profile-only"\n`), undefined);
+});
+
+test("backs up Codex configuration without changing it", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-fallback-config-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const configFile = join(root, "config.toml");
+  const contents = "disable_response_storage = true\n";
+  await writeFile(configFile, contents, "utf8");
+  const backup = await backupConfig(configFile, join(root, "backups"));
+  assert.equal(await readFile(backup, "utf8"), contents);
+  assert.equal(await readFile(configFile, "utf8"), contents);
+});
+
+test("DPAPI protects and restores the API key for the current Windows user", { skip: process.platform !== "win32" }, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-fallback-dpapi-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const secret = ["test", "credential", crypto.randomUUID().replaceAll("-", "")].join("-");
+  const paths = {
+    runtimeDir: root,
+    secretFile: join(root, "secret.dpapi"),
+    configFile: join(root, "config.json"),
+    stateFile: join(root, "state.json"),
+    pidFile: join(root, "pid.json"),
+    logFile: join(root, "router.log"),
+    backupDir: join(root, "backups"),
+    runtimeCli: join(root, "bin", "cli.mjs"),
+    commandShim: join(root, "bin", "codex-fallback.cmd"),
+    codexConfigFile: join(root, "config.toml"),
+  } satisfies AppPaths;
+
+  await storeApiKey(paths, secret);
+  assert.equal(await readApiKey(paths), secret);
+  assert.doesNotMatch(await readFile(paths.secretFile, "utf8"), new RegExp(secret));
+  assert.throws(() => validateApiKey("short"), /short/);
+});

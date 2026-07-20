@@ -50,7 +50,21 @@ function walk(directory) {
 
 const mode = process.argv[2] ?? "--all";
 const findings = [];
-if (mode === "--staged") {
+if (mode === "--self-test") {
+  const syntheticGatewayKey = ["gx", "-", "a".repeat(32)].join("");
+  const syntheticOpenAiKey = ["sk", "-", "b".repeat(32)].join("");
+  if (findSecrets(syntheticGatewayKey, "self-test").length !== 1) {
+    throw new Error("Gateway-key detector self-test failed.");
+  }
+  if (findSecrets(syntheticOpenAiKey, "self-test").length !== 1) {
+    throw new Error("OpenAI-style detector self-test failed.");
+  }
+  if (findSecrets("safe placeholder text", "self-test").length !== 0) {
+    throw new Error("Secret scanner produced a false positive for safe text.");
+  }
+  console.log("Secret scanner self-test passed.");
+  process.exit(0);
+} else if (mode === "--staged") {
   findings.push(...findSecrets(stagedText(), "staged diff"));
 } else if (mode === "--all") {
   for (const path of walk(repoRoot)) {
@@ -81,4 +95,3 @@ if (findings.length > 0) {
 }
 
 console.log(`Secret scan passed (${mode}).`);
-
