@@ -19,6 +19,7 @@ import {
   createRouterConfig,
   fallbackResponsesUrl,
   normalizeBaseUrl,
+  normalizeFallbackRetries,
   normalizeResponsesPath,
   normalizeRoutingMode,
   normalizeUpstreamProxyUrl,
@@ -190,4 +191,30 @@ test("DPAPI protects and restores the API key for the current Windows user", { s
   assert.equal(await readApiKey(paths), secret);
   assert.doesNotMatch(await readFile(paths.secretFile, "utf8"), new RegExp(secret));
   assert.throws(() => validateApiKey("short"), /short/);
+});
+
+test("fallback retries default to three and reject invalid values", () => {
+  assert.equal(normalizeFallbackRetries(undefined), 3);
+  assert.equal(normalizeFallbackRetries(0), 0);
+  assert.equal(normalizeFallbackRetries(10), 10);
+  assert.throws(() => normalizeFallbackRetries(-1), /between 0 and 10/);
+  assert.throws(() => normalizeFallbackRetries(11), /between 0 and 10/);
+  assert.throws(() => normalizeFallbackRetries(1.5), /between 0 and 10/);
+  assert.throws(() => normalizeFallbackRetries("3"), /between 0 and 10/);
+});
+
+test("router config carries fallback retries with the default applied", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "codex-fallback-retries-"));
+  t.after(async () => rm(root, { recursive: true, force: true }));
+  const paths = testPaths(root);
+
+  const config = createRouterConfig({ baseUrl: "https://fallback.example/v1", fallbackRetries: 2 });
+  assert.equal(config.fallbackRetries, 2);
+  await writeRouterConfig(paths, config);
+  assert.equal((await readRouterConfig(paths)).fallbackRetries, 2);
+
+  const legacy = { ...config } as Record<string, unknown>;
+  delete legacy.fallbackRetries;
+  await writeFile(paths.configFile, `${JSON.stringify(legacy, null, 2)}\n`, "utf8");
+  assert.equal((await readRouterConfig(paths)).fallbackRetries, 3);
 });

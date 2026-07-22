@@ -60,6 +60,7 @@ async function createHarness(
   primaryHandler: (request: IncomingMessage, response: ServerResponse) => void,
   fallbackHandler: (request: IncomingMessage, response: ServerResponse) => void,
   initialRoutingMode: RoutingMode = "auto",
+  configOverrides: Partial<RouterConfig> = {},
 ): Promise<{
   routerOrigin: string;
   logFile: string;
@@ -81,6 +82,7 @@ async function createHarness(
     officialBaseUrl: `${primary.origin}/backend-api/codex`,
     latchMinutes: 15,
     routingMode,
+    ...configOverrides,
   };
   const logger = new SafeLogger(logFile);
   await logger.initialize();
@@ -485,4 +487,87 @@ test("non-model routes keep official authentication in every routing mode", asyn
   assert.equal(officialAuthorization, "Bearer primary-session-token");
   assert.equal(officialCookie, "session=primary");
   assert.equal(fallbackCalls, 0);
+});
+
+test("fallback transport failures are retried until the upstream succeeds", async (t) => {
+  let fallbackAttempts = 0;
+  const harness = await createHarness(
+    t,
+    (_request, response) => {
+      response.writeHead(429, { "content-type": "application/json" });
+      response.end(quotaBody());
+    },
+    (request, response) => {
+      fallbackAttempts += 1;
+      if (fallbackAttempts < 3) {
+        request.socket.destroy();
+        return;
+      }
+      response.writeHead(200, { "content-type": "text/event-stream" });
+      response.end("data: {\"type\":\"response.completed\",\"provider\":\"fallback\"}\n\n");
+    },
+    "fallback",
+    { fallbackRetries: 3 },
+  );
+
+  const response = await postResponses(harness.routerOrigin);
+  assert.equal(response.status, 200);
+  assert.match(await response.text(), /response.completed/);
+  assert.equal(fallbackAttempts, 3);
+  const log = await readFile(harness.logFile, "utf8");
+  assert.match(log, /"event":"upstream_retry"/);
+  assert.match(log, /ECONNRESET/);
+});
+
+test("exhausted fallback retries return a sanitized 502 with log detail", async (t) => {
+  let fallbackAttempts = 0;
+  const harness = await createHarness(
+    t,
+    (_request, response) => {
+      response.writeHead(429, { "content-type": "application/json" });
+      response.end(quotaBody());
+    },
+    (request) => {
+      fallbackAttempts += 1;
+      request.socket.destroy();
+    },
+    "fallback",
+    { fallbackRetries: 1 },
+  );
+
+  const response = await postResponses(harness.routerOrigin);
+  const body = await response.text();
+  assert.equal(response.status, 502);
+  assert.match(body, /fallback_unreachable/);
+  assert.doesNotMatch(body, new RegExp(harness.apiKey));
+  assert.equal(fallbackAttempts, 2);
+  const log = await readFile(harness.logFile, "utf8");
+  assert.match(log, /"event":"upstream_error","requestId":"[^"]+","provider":"fallback","durationMs":\d+,"detail":"ECONNRESET"/);
+  assert.doesNotMatch(log, new RegExp(harness.apiKey));
+});
+
+test("fallback is never retried once response headers reached the client", async (t) => {
+  let fallbackAttempts = 0;
+  const harness = await createHarness(
+    t,
+    (_request, response) => {
+      response.writeHead(429, { "content-type": "application/json" });
+      response.end(quotaBody());
+    },
+    (request, response) => {
+      fallbackAttempts += 1;
+      void readBody(request).then(() => {
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.write("data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n");
+        setTimeout(() => response.destroy(), 10);
+      });
+    },
+    "fallback",
+    { fallbackRetries: 3 },
+  );
+
+  const response = await postResponses(harness.routerOrigin);
+  assert.equal(response.status, 200);
+  await assert.rejects(async () => response.text());
+  assert.equal(fallbackAttempts, 1);
 });

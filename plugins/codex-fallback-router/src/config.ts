@@ -2,9 +2,11 @@ import { readFile } from "node:fs/promises";
 
 import {
   CONFIG_VERSION,
+  DEFAULT_FALLBACK_RETRIES,
   DEFAULT_HOST,
   DEFAULT_LATCH_MINUTES,
   DEFAULT_PORT,
+  MAX_FALLBACK_RETRIES,
   OFFICIAL_CHATGPT_BASE_URL,
 } from "./constants.js";
 import { atomicWriteFile, pathExists } from "./file-utils.js";
@@ -23,12 +25,21 @@ export interface RouterConfig {
   latchMinutes: number;
   routingMode: RoutingMode;
   upstreamProxyUrl?: string;
+  fallbackRetries?: number;
 }
 
 export function normalizeRoutingMode(raw: unknown): RoutingMode {
   if (raw === undefined) return "auto";
   if (raw === "auto" || raw === "fallback" || raw === "primary") return raw;
   throw new Error("Routing mode must be one of: auto, fallback, primary.");
+}
+
+export function normalizeFallbackRetries(raw: unknown): number {
+  if (raw === undefined) return DEFAULT_FALLBACK_RETRIES;
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0 || raw > MAX_FALLBACK_RETRIES) {
+    throw new Error(`Fallback retries must be an integer between 0 and ${MAX_FALLBACK_RETRIES}.`);
+  }
+  return raw;
 }
 
 export function normalizeBaseUrl(raw: string): string {
@@ -94,6 +105,7 @@ export function createRouterConfig(options: {
   listenPort?: number;
   routingMode?: RoutingMode;
   upstreamProxyUrl?: string;
+  fallbackRetries?: number;
 }): RouterConfig {
   const fallbackBaseUrl = normalizeBaseUrl(options.baseUrl);
   const listenPort = options.listenPort ?? DEFAULT_PORT;
@@ -114,6 +126,7 @@ export function createRouterConfig(options: {
     ...(options.upstreamProxyUrl
       ? { upstreamProxyUrl: normalizeUpstreamProxyUrl(options.upstreamProxyUrl) }
       : {}),
+    fallbackRetries: normalizeFallbackRetries(options.fallbackRetries),
   };
 }
 
@@ -154,7 +167,8 @@ export async function readRouterConfig(paths: AppPaths): Promise<RouterConfig> {
   normalizeResponsesPath(parsed.fallbackResponsesPath, parsed.fallbackBaseUrl);
   const routingMode = normalizeRoutingMode(parsed.routingMode);
   if (parsed.upstreamProxyUrl !== undefined) normalizeUpstreamProxyUrl(parsed.upstreamProxyUrl);
-  return { ...(parsed as Omit<RouterConfig, "routingMode">), routingMode };
+  const fallbackRetries = normalizeFallbackRetries(parsed.fallbackRetries);
+  return { ...(parsed as Omit<RouterConfig, "routingMode" | "fallbackRetries">), routingMode, fallbackRetries };
 }
 
 export function fallbackResponsesUrl(config: RouterConfig): URL {

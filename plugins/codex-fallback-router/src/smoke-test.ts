@@ -1,30 +1,56 @@
 import { readCodexConfig, inspectRootModel } from "./codex-config.js";
 import { fallbackResponsesUrl, readRouterConfig, type RouterConfig } from "./config.js";
+import { safeNetworkCode } from "./errors.js";
 import { readApiKey } from "./dpapi.js";
 import { getAppPaths, type AppPaths } from "./paths.js";
 import { openUpstreamRequest } from "./transport.js";
 
 const MAX_SMOKE_RESPONSE_BYTES = 2 * 1024 * 1024;
 const SMOKE_TIMEOUT_MS = 45_000;
+const OFFICIAL_PROBE_TIMEOUT_MS = 15_000;
+
+export interface OfficialProbeResult {
+  endpoint: string;
+  reachable: boolean;
+  status?: number;
+  code?: string;
+}
+
+/**
+ * Probes the official ChatGPT backend without any account credential.
+ * Any HTTP response at all (typically 401/403) proves the network path works;
+ * a transport-level failure means the official backend is currently unreachable.
+ * Note: reachability does not prove that the account quota has reset — only a
+ * real Codex request can determine that (which is what `mode auto` does on
+ * every message).
+ */
+export async function probeOfficialBackend(
+  config: RouterConfig,
+  timeoutMs: number = OFFICIAL_PROBE_TIMEOUT_MS,
+): Promise<OfficialProbeResult> {
+  const target = new URL(config.officialBaseUrl);
+  const endpoint = target.origin + target.pathname;
+  try {
+    const response = await openUpstreamRequest({
+      target,
+      method: "GET",
+      headers: { accept: "application/json" },
+      timeoutMs,
+      ...(config.upstreamProxyUrl ? { proxyUrl: config.upstreamProxyUrl } : {}),
+    });
+    const status = response.statusCode ?? 0;
+    response.destroy();
+    return { endpoint, reachable: true, status };
+  } catch (error) {
+    return { endpoint, reachable: false, code: safeNetworkCode(error) };
+  }
+}
 
 export interface SmokeTestResult {
   endpoint: string;
   model: string;
   status: number;
   responseIdPresent: boolean;
-}
-
-function safeNetworkCode(error: unknown): string {
-  let current = error;
-  for (let depth = 0; depth < 5; depth += 1) {
-    if (!current || typeof current !== "object") break;
-    const record = current as Record<string, unknown>;
-    if (typeof record.code === "string" && /^[A-Z][A-Z0-9_]{1,40}$/.test(record.code)) {
-      return record.code;
-    }
-    current = record.cause;
-  }
-  return "NETWORK_ERROR";
 }
 
 async function readLimitedResponse(response: import("node:http").IncomingMessage): Promise<string> {

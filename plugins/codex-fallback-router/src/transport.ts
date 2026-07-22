@@ -88,12 +88,19 @@ export async function createUpstreamRequest(
 
 export function openUpstreamRequest(options: UpstreamRequestOptions): Promise<IncomingMessage> {
   return new Promise((resolve, reject) => {
-    void createUpstreamRequest(options, resolve).then((request) => {
-      request.once("error", reject);
-      request.setTimeout(options.timeoutMs ?? 120_000, () => {
-        request.destroy(new Error("Upstream request timed out."));
+    let request: ClientRequest | undefined;
+    void createUpstreamRequest(options, (response) => {
+      // Response headers have arrived; a long SSE stream may idle far longer
+      // than the connect timeout, so the socket timeout must not keep running.
+      request?.setTimeout(0);
+      resolve(response);
+    }).then((created) => {
+      request = created;
+      created.once("error", reject);
+      created.setTimeout(options.timeoutMs ?? 120_000, () => {
+        created.destroy(new Error("Upstream request timed out."));
       });
-      request.end(options.body);
+      created.end(options.body);
     }, reject);
   });
 }

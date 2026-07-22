@@ -9,7 +9,9 @@ import https from "node:https";
 import { once } from "node:events";
 
 import { fallbackResponsesUrl, type RouterConfig, type RoutingMode } from "./config.js";
+import { DEFAULT_FALLBACK_RETRIES } from "./constants.js";
 import { prepareFallbackRequestBody } from "./context.js";
+import { safeNetworkCode } from "./errors.js";
 import {
   fallbackRequestHeaders,
   primaryRequestHeaders,
@@ -24,7 +26,12 @@ const MAX_RESPONSE_REQUEST_BYTES = 128 * 1024 * 1024;
 const MAX_ERROR_BYTES = 2 * 1024 * 1024;
 const INITIAL_SSE_BYTES = 64 * 1024;
 const INITIAL_SSE_TIMEOUT_MS = 5_000;
+const FALLBACK_RETRY_DELAYS_MS = [2_000, 5_000, 10_000];
 const LOCAL_PREFIX = "/backend-api/codex";
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function requestModule(target: URL): typeof http | typeof https {
   return target.protocol === "https:" ? https : http;
@@ -214,14 +221,44 @@ export async function createRouterServer(options: {
       writeError(response, 502, "fallback_body_invalid", (error as Error).message);
       return;
     }
+    const maxRetries = config.fallbackRetries ?? DEFAULT_FALLBACK_RETRIES;
+    let upstream: IncomingMessage;
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        upstream = await openUpstreamRequest({
+          target: fallbackResponsesUrl(config),
+          method: request.method ?? "POST",
+          headers: fallbackRequestHeaders(request.headers, apiKey, fallbackBody.length),
+          body: fallbackBody,
+          ...(config.upstreamProxyUrl ? { proxyUrl: config.upstreamProxyUrl } : {}),
+        });
+        break;
+      } catch (error) {
+        const detail = safeNetworkCode(error);
+        if (attempt >= maxRetries) {
+          await logger.write({
+            event: "upstream_error",
+            requestId,
+            provider: "fallback",
+            durationMs: Date.now() - started,
+            detail,
+          });
+          writeError(response, 502, "fallback_unreachable", "Fallback Responses API is unreachable.");
+          return;
+        }
+        // Nothing has been written to the client yet, so a transport-level
+        // failure (TLS reset, CONNECT failure) is safe to retry.
+        await logger.write({
+          event: "upstream_retry",
+          requestId,
+          provider: "fallback",
+          durationMs: Date.now() - started,
+          detail: `attempt=${attempt + 1} ${detail}`,
+        });
+        await delay(FALLBACK_RETRY_DELAYS_MS[Math.min(attempt, FALLBACK_RETRY_DELAYS_MS.length - 1)] ?? 10_000);
+      }
+    }
     try {
-      const upstream = await openUpstreamRequest({
-        target: fallbackResponsesUrl(config),
-        method: request.method ?? "POST",
-        headers: fallbackRequestHeaders(request.headers, apiKey, fallbackBody.length),
-        body: fallbackBody,
-        ...(config.upstreamProxyUrl ? { proxyUrl: config.upstreamProxyUrl } : {}),
-      });
       await logger.write({
         event: "upstream_response",
         requestId,
@@ -240,12 +277,13 @@ export async function createRouterServer(options: {
         return;
       }
       await streamResponse(response, upstream);
-    } catch {
+    } catch (error) {
       await logger.write({
         event: "upstream_error",
         requestId,
         provider: "fallback",
         durationMs: Date.now() - started,
+        detail: safeNetworkCode(error),
       });
       if (!response.headersSent) {
         writeError(response, 502, "fallback_unreachable", "Fallback Responses API is unreachable.");
@@ -278,12 +316,13 @@ export async function createRouterServer(options: {
         durationMs: Date.now() - started,
       });
       await streamResponse(response, upstream);
-    } catch {
+    } catch (error) {
       await logger.write({
         event: "upstream_error",
         requestId,
         provider: "primary",
         durationMs: Date.now() - started,
+        detail: safeNetworkCode(error),
       });
       if (!response.headersSent) {
         writeError(response, 502, "primary_unreachable", "Official ChatGPT backend is unreachable.");
@@ -335,12 +374,13 @@ export async function createRouterServer(options: {
         body,
         ...(config.upstreamProxyUrl ? { proxyUrl: config.upstreamProxyUrl } : {}),
       });
-    } catch {
+    } catch (error) {
       await logger.write({
         event: "upstream_error",
         requestId,
         provider: "primary",
         durationMs: Date.now() - started,
+        detail: safeNetworkCode(error),
       });
       writeError(response, 502, "primary_unreachable", "Official ChatGPT backend is unreachable.");
       return;
@@ -446,5 +486,9 @@ export async function createRouterServer(options: {
   });
   server.requestTimeout = 0;
   server.headersTimeout = 65_000;
+  // Must exceed the Node default (5s) so idle pooled connections from the
+  // Codex client are not closed underneath it, which surfaces as
+  // "error sending request" on the next reuse.
+  server.keepAliveTimeout = 75_000;
   return { server, latch };
 }

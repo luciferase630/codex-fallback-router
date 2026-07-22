@@ -15,7 +15,7 @@ import { installRouter, uninstallRouter } from "./install.js";
 import { assertNodeVersion } from "./platform.js";
 import { getAppPaths } from "./paths.js";
 import { atomicWriteFile } from "./file-utils.js";
-import { runConfiguredSmokeTest } from "./smoke-test.js";
+import { runConfiguredSmokeTest, probeOfficialBackend } from "./smoke-test.js";
 
 interface ParsedArgs {
   command: string;
@@ -81,6 +81,7 @@ Usage:
   ${CLI_NAME} start [--quiet]
   ${CLI_NAME} stop
   ${CLI_NAME} status
+  ${CLI_NAME} check
   ${CLI_NAME} smoke-test [--model <id>]
   ${CLI_NAME} uninstall [--keep-secret]
 `);
@@ -160,6 +161,56 @@ async function handleMode(args: ParsedArgs): Promise<void> {
   );
 }
 
+async function handleCheck(): Promise<void> {
+  const paths = getAppPaths();
+  const config = await readRouterConfig(paths);
+  const health = await getHealth(paths);
+  console.log(
+    health
+      ? `Router daemon: running (PID ${health.pid}, mode ${health.routingMode}` +
+        `${health.fallbackUntil ? `, fallback latched until ${health.fallbackUntil}` : ""}).`
+      : "Router daemon: not running.",
+  );
+
+  let fallbackOk = false;
+  try {
+    const result = await runConfiguredSmokeTest({ paths });
+    fallbackOk = true;
+    console.log(`Fallback provider: OK (HTTP ${result.status}, endpoint ${result.endpoint}).`);
+  } catch (error) {
+    console.log(`Fallback provider: FAILED (${error instanceof Error ? error.message : String(error)})`);
+  }
+
+  const probe = await probeOfficialBackend(config);
+  console.log(
+    probe.reachable
+      ? `Official ChatGPT backend: reachable (HTTP ${probe.status ?? 0}, unauthenticated probe).`
+      : `Official ChatGPT backend: UNREACHABLE (${probe.code ?? "NETWORK_ERROR"}).`,
+  );
+
+  console.log("");
+  if (probe.reachable) {
+    console.log(
+      "The official backend is reachable. You can switch back at any time - no Codex restart is needed:\n" +
+      `  ${CLI_NAME} mode auto     (official first; automatically falls back while quota is exhausted, and switches back on its own once quota resets)\n` +
+      `  ${CLI_NAME} mode primary  (official only, no fallback)\n` +
+      "The new mode applies from the next message; in-flight replies are not interrupted.\n" +
+      "Note: this probe only proves network reachability, not that your account quota has reset. " +
+      "'mode auto' is the safe choice because it verifies the quota with a real request on every message.",
+    );
+  } else {
+    console.log(
+      "The official backend cannot be reached from this machine right now (check your network/proxy). " +
+      `Stay in fallback mode and re-run '${CLI_NAME} check' later.`,
+    );
+  }
+  if (!fallbackOk) {
+    console.log(
+      `Warning: the fallback provider is also failing. Inspect the detail codes in the router log or run '${CLI_NAME} smoke-test' again before relying on it.`,
+    );
+  }
+}
+
 async function main(): Promise<void> {
   assertNodeVersion();
   const args = parseArgs(process.argv.slice(2));
@@ -208,6 +259,10 @@ async function main(): Promise<void> {
   }
   if (args.command === "daemon") {
     await runDaemon();
+    return;
+  }
+  if (args.command === "check") {
+    await handleCheck();
     return;
   }
   if (args.command === "smoke-test") {

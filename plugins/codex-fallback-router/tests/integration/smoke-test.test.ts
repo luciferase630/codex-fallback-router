@@ -3,7 +3,7 @@ import http, { type IncomingMessage, type Server } from "node:http";
 import test, { type TestContext } from "node:test";
 
 import type { RouterConfig } from "../../src/config.js";
-import { smokeTestFallback } from "../../src/smoke-test.js";
+import { smokeTestFallback, probeOfficialBackend } from "../../src/smoke-test.js";
 
 async function listen(server: Server): Promise<{ server: Server; origin: string }> {
   await new Promise<void>((resolve, reject) => {
@@ -106,4 +106,30 @@ test("smoke test reports a sanitized network code", async () => {
     }),
     /failed before receiving an HTTP response \([A-Z0-9_]+\)/,
   );
+});
+
+test("official probe reports reachability from any HTTP response", async (t: TestContext) => {
+  const server = await listen(http.createServer((_request, response) => {
+    response.writeHead(401, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: { code: "unauthorized" } }));
+  }));
+  t.after(async () => close(server.server));
+
+  const probe = await probeOfficialBackend({ ...config(server.origin), officialBaseUrl: server.origin });
+  assert.equal(probe.reachable, true);
+  assert.equal(probe.status, 401);
+  assert.equal(probe.code, undefined);
+});
+
+test("official probe reports a sanitized network code when unreachable", async () => {
+  const unavailable = await listen(http.createServer());
+  await close(unavailable.server);
+
+  const probe = await probeOfficialBackend(
+    { ...config(unavailable.origin), officialBaseUrl: unavailable.origin },
+    2_000,
+  );
+  assert.equal(probe.reachable, false);
+  assert.equal(probe.status, undefined);
+  assert.match(probe.code ?? "", /^[A-Z][A-Z0-9_]{1,40}$/);
 });
