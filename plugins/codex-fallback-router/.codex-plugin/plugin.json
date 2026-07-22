@@ -1,6 +1,6 @@
 {
   "name": "codex-fallback-router",
-  "version": "0.2.0",
+  "version": "0.2.3",
   "description": "Routes Codex Desktop model requests through automatic, fallback, or primary modes.",
   "author": {
     "name": "luciferase630"

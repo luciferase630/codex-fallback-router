@@ -96,7 +96,9 @@ export function openUpstreamRequest(options: UpstreamRequestOptions): Promise<In
       resolve(response);
     }).then((created) => {
       request = created;
-      created.once("error", reject);
+      // Persistent listener: reject is a no-op once the promise has settled,
+      // and a second error must never surface as an uncaught exception.
+      created.on("error", reject);
       created.setTimeout(options.timeoutMs ?? 120_000, () => {
         created.destroy(new Error("Upstream request timed out."));
       });

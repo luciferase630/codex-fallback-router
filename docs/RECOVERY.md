@@ -1,5 +1,21 @@
 # Recovery guide
 
+## Codex shows "stream disconnected" / "error sending request" and the router is down
+
+Check whether the daemon is even alive:
+
+```powershell
+codex-fallback status
+```
+
+If it reports `Router is not running`, nothing is listening on the local port and every Codex request will fail with "error sending request". Bring it back:
+
+```powershell
+codex-fallback start
+```
+
+No Codex restart is needed; the next message works immediately. Since v0.2.3 the daemon absorbs unexpected per-connection errors instead of crashing, and records `daemon_uncaught` events (with a sanitized detail code) in `%LOCALAPPDATA%\codex-fallback-router\router.log` — check that log first if the daemon ever dies again. A stale `router.pid.json` without a running process means the previous daemon exited uncleanly; `start` reconciles it.
+
 ## Codex cannot connect after installation
 
 Open PowerShell outside Codex and try:

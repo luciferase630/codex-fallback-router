@@ -4,6 +4,7 @@ import { readFile, rm } from "node:fs/promises";
 import { VERSION } from "./constants.js";
 import { normalizeRoutingMode, readRouterConfig, type RoutingMode } from "./config.js";
 import { readApiKey } from "./dpapi.js";
+import { safeNetworkCode } from "./errors.js";
 import { atomicWriteFile, pathExists } from "./file-utils.js";
 import { SafeLogger } from "./logger.js";
 import { getAppPaths, type AppPaths } from "./paths.js";
@@ -74,6 +75,21 @@ export async function runDaemon(paths: AppPaths = getAppPaths()): Promise<void> 
   const apiKey = await readApiKey(paths);
   const logger = new SafeLogger(paths.logFile);
   await logger.initialize();
+  // A local loopback router must never die silently: log unexpected failures
+  // with a sanitized detail code and keep serving. Startup errors still
+  // surface normally because these handlers are registered before listen.
+  process.on("uncaughtException", (error) => {
+    void logger.write({
+      event: "daemon_uncaught",
+      detail: `uncaughtException ${safeNetworkCode(error)}`,
+    });
+  });
+  process.on("unhandledRejection", (reason) => {
+    void logger.write({
+      event: "daemon_uncaught",
+      detail: `unhandledRejection ${safeNetworkCode(reason)}`,
+    });
+  });
   const runtime = await createRouterServer({
     config,
     apiKey,

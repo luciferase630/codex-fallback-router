@@ -571,3 +571,64 @@ test("fallback is never retried once response headers reached the client", async
   await assert.rejects(async () => response.text());
   assert.equal(fallbackAttempts, 1);
 });
+
+test("fallback retries stop as soon as the client disconnects", async (t) => {
+  let fallbackAttempts = 0;
+  const harness = await createHarness(
+    t,
+    (_request, response) => {
+      response.writeHead(429, { "content-type": "application/json" });
+      response.end(quotaBody());
+    },
+    (request) => {
+      fallbackAttempts += 1;
+      request.socket.destroy();
+    },
+    "fallback",
+    { fallbackRetries: 3 },
+  );
+
+  const controller = new AbortController();
+  const pending = fetch(`${harness.routerOrigin}/backend-api/codex/responses`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(portableRequest()),
+    signal: controller.signal,
+  }).catch(() => undefined);
+  // The first attempt fails fast (socket destroyed), then the router backs off
+  // for 2s; aborting during the backoff must prevent any further attempts.
+  await new Promise((resolve) => setTimeout(resolve, 500));
+  controller.abort();
+  await pending;
+  await new Promise((resolve) => setTimeout(resolve, 3_000));
+  assert.equal(fallbackAttempts, 1);
+  const log = await readFile(harness.logFile, "utf8");
+  assert.match(log, /"event":"client_aborted"/);
+});
+
+test("connection refused fails fast without hammering the provider", async (t) => {
+  const unavailable = await listen(http.createServer());
+  const unavailableOrigin = unavailable.origin;
+  await close(unavailable.server);
+  const harness = await createHarness(
+    t,
+    (_request, response) => {
+      response.writeHead(429, { "content-type": "application/json" });
+      response.end(quotaBody());
+    },
+    (_request, response) => {
+      response.end();
+    },
+    "fallback",
+    { fallbackRetries: 3, fallbackBaseUrl: unavailableOrigin },
+  );
+
+  const started = Date.now();
+  const response = await postResponses(harness.routerOrigin);
+  assert.equal(response.status, 502);
+  assert.match(await response.text(), /fallback_unreachable/);
+  assert.ok(Date.now() - started < 1_500, "ECONNREFUSED must not wait for retry backoff");
+  const log = await readFile(harness.logFile, "utf8");
+  assert.doesNotMatch(log, /"event":"upstream_retry"/);
+  assert.match(log, /"detail":"ECONNREFUSED"/);
+});

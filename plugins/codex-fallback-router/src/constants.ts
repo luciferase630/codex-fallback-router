@@ -1,6 +1,6 @@
 export const APP_NAME = "codex-fallback-router";
 export const CLI_NAME = "codex-fallback";
-export const VERSION = "0.2.2";
+export const VERSION = "0.2.3";
 export const CONFIG_VERSION = 1;
 export const DEFAULT_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 45831;

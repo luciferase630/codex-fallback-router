@@ -222,8 +222,23 @@ export async function createRouterServer(options: {
       return;
     }
     const maxRetries = config.fallbackRetries ?? DEFAULT_FALLBACK_RETRIES;
+    // Stop hammering the provider as soon as the Codex client has given up;
+    // nothing may be written to a disconnected client.
+    let clientGone = response.destroyed;
+    response.on("close", () => {
+      clientGone = true;
+    });
     let upstream: IncomingMessage;
     for (let attempt = 0; ; attempt += 1) {
+      if (clientGone) {
+        await logger.write({
+          event: "client_aborted",
+          requestId,
+          provider: "fallback",
+          durationMs: Date.now() - started,
+        });
+        return;
+      }
       try {
         upstream = await openUpstreamRequest({
           target: fallbackResponsesUrl(config),
@@ -235,7 +250,19 @@ export async function createRouterServer(options: {
         break;
       } catch (error) {
         const detail = safeNetworkCode(error);
-        if (attempt >= maxRetries) {
+        if (clientGone) {
+          await logger.write({
+            event: "client_aborted",
+            requestId,
+            provider: "fallback",
+            durationMs: Date.now() - started,
+            detail,
+          });
+          return;
+        }
+        // ECONNREFUSED means the provider (or the local proxy) is down rather
+        // than flaky; retrying immediately only adds to the failure storm.
+        if (detail === "ECONNREFUSED" || attempt >= maxRetries) {
           await logger.write({
             event: "upstream_error",
             requestId,
@@ -243,7 +270,9 @@ export async function createRouterServer(options: {
             durationMs: Date.now() - started,
             detail,
           });
-          writeError(response, 502, "fallback_unreachable", "Fallback Responses API is unreachable.");
+          if (!response.destroyed) {
+            writeError(response, 502, "fallback_unreachable", "Fallback Responses API is unreachable.");
+          }
           return;
         }
         // Nothing has been written to the client yet, so a transport-level
@@ -458,6 +487,14 @@ export async function createRouterServer(options: {
   }
 
   const server = http.createServer((request, response) => {
+    // Clients (Codex) may disconnect at any time; socket errors must be
+    // absorbed here so they can never crash the daemon process.
+    request.on("error", (error) => {
+      void logger.write({ event: "client_error", detail: `request ${safeNetworkCode(error)}` });
+    });
+    response.on("error", (error) => {
+      void logger.write({ event: "client_error", detail: `response ${safeNetworkCode(error)}` });
+    });
     void (async () => {
       if (request.url === "/_codex-fallback/health") {
         const routingMode = await getRoutingMode();
