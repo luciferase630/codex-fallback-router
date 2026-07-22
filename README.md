@@ -1,5 +1,7 @@
 # Codex Fallback Router
 
+**English | [中文](README.zh-CN.md)**
+
 An experimental, no-GUI fallback router for Codex Desktop on Windows. It supports automatic quota failover plus persistent manual fallback and primary routing modes while keeping ChatGPT account services connected.
 
 中文简介：这是一个面向 Windows Codex Desktop 的本地备用路由插件，支持额度耗尽自动切换，以及持久化的手动备用、强制官方三种模式；账号和非模型接口始终保留在官方 ChatGPT 登录态。
@@ -83,6 +85,7 @@ codex-fallback install [--allow-untested-version]
 codex-fallback start [--quiet]
 codex-fallback stop
 codex-fallback status
+codex-fallback check
 codex-fallback smoke-test [--model <id>]
 codex-fallback uninstall [--keep-secret]
 ```
@@ -112,6 +115,17 @@ codex-fallback mode auto
 ```
 
 `fallback` routes only Responses model requests to the configured provider; ChatGPT account and other non-model routes remain on the official backend. Add `--check` to verify the fallback Responses API before changing mode. `primary` never fails over, even for a quota error. `auto` restores the default official-first quota behavior. `status` reports both the configured `routingMode` and the currently effective provider in `mode`.
+
+`check` reports the daemon state, runs a real fallback smoke test, and probes official-backend reachability (unauthenticated), then prints the exact switch-back command. Reachability does not prove the account quota has reset; `auto` mode verifies that with a real request on every message.
+
+## Fallback resilience
+
+- Fallback requests that fail at the transport layer (TLS reset, CONNECT failure, timeout) before any response headers arrive are retried with 2s/5s/10s backoff, up to `fallbackRetries` attempts (default 3). A retry never happens once bytes have streamed to Codex, so a reply can never be duplicated.
+- `ECONNREFUSED` fails fast instead of backing off: the provider (or local proxy) is down, not flaky.
+- Retries stop immediately when the Codex client disconnects; nothing is ever written to a dead client.
+- The upstream socket timeout only applies until response headers arrive, so long SSE streams are not cut mid-reasoning.
+- The daemon absorbs per-connection and unexpected errors (logged as `daemon_uncaught` with a sanitized detail code) instead of crashing; a stopped router is a local availability dependency, so the daemon must stay alive.
+- Every `upstream_retry`/`upstream_error` log event carries a sanitized network detail code (e.g. `ECONNRESET`) for fast diagnosis.
 
 ## Failover policy
 
@@ -166,7 +180,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) and [docs/RELEASING.md](docs/RELEASING.md
 
 - Codex Desktop internals can change without notice. Compatibility is deliberately fail-closed.
 - The router is a local availability dependency while installed. If it stops, start it or uninstall to restore direct official routing.
-- A failed fallback returns one sanitized error; it does not retry repeatedly or switch models automatically.
+- A failed fallback returns one sanitized error after the bounded retry budget; it does not switch models automatically.
 - The project cannot guarantee third-party uptime, model compatibility, account-history access, or future Codex compatibility.
 - A real quota-exhaustion event is difficult to reproduce safely. Mock integration coverage and a direct provider smoke test validate different parts of the system; both are required.
 - Manual mode changes are sampled at the start of each new Responses request; an already-running response continues on its original provider.
