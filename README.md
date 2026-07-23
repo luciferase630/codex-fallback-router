@@ -86,6 +86,7 @@ codex-fallback start [--quiet]
 codex-fallback stop
 codex-fallback status
 codex-fallback check
+codex-fallback autostart on|off|status
 codex-fallback smoke-test [--model <id>]
 codex-fallback uninstall [--keep-secret]
 ```
@@ -125,6 +126,7 @@ codex-fallback mode auto
 - Retries stop immediately when the Codex client disconnects; nothing is ever written to a dead client.
 - The upstream socket timeout only applies until response headers arrive, so long SSE streams are not cut mid-reasoning.
 - The daemon absorbs per-connection and unexpected errors (logged as `daemon_uncaught` with a sanitized detail code) instead of crashing; a stopped router is a local availability dependency, so the daemon must stay alive.
+- A logon watchdog (HKCU Run key, no administrator rights) starts the router at every Windows logon and re-checks it every 60 seconds, healing reboots and later daemon deaths without relying on the Codex SessionStart hook. Control it with `codex-fallback autostart on|off|status`; it is registered automatically by `install` and removed by `uninstall`.
 - Every `upstream_retry`/`upstream_error` log event carries a sanitized network detail code (e.g. `ECONNRESET`) for fast diagnosis.
 
 ## Failover policy

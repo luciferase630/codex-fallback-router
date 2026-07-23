@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 
 import { CLI_NAME, VERSION } from "./constants.js";
+import { autostartInstalled, installAutostart, uninstallAutostart } from "./autostart.js";
 import {
   createRouterConfig,
   normalizeRoutingMode,
@@ -10,7 +11,7 @@ import {
   type RoutingMode,
 } from "./config.js";
 import { readApiKey, storeApiKey } from "./dpapi.js";
-import { getHealth, runDaemon, startDaemon, stopDaemon } from "./daemon.js";
+import { getHealth, runDaemon, runWatchdog, startDaemon, stopDaemon } from "./daemon.js";
 import { installRouter, uninstallRouter } from "./install.js";
 import { assertNodeVersion } from "./platform.js";
 import { getAppPaths } from "./paths.js";
@@ -82,6 +83,7 @@ Usage:
   ${CLI_NAME} stop
   ${CLI_NAME} status
   ${CLI_NAME} check
+  ${CLI_NAME} autostart on|off|status
   ${CLI_NAME} smoke-test [--model <id>]
   ${CLI_NAME} uninstall [--keep-secret]
 `);
@@ -187,6 +189,11 @@ async function handleCheck(): Promise<void> {
       ? `Official ChatGPT backend: reachable (HTTP ${probe.status ?? 0}, unauthenticated probe).`
       : `Official ChatGPT backend: UNREACHABLE (${probe.code ?? "NETWORK_ERROR"}).`,
   );
+  console.log(
+    (await autostartInstalled())
+      ? "Watchdog: installed (HKCU Run key; starts the router at logon and re-checks every 60 seconds)."
+      : "Watchdog: NOT installed (run 'codex-fallback autostart on').",
+  );
 
   console.log("");
   if (probe.reachable) {
@@ -260,6 +267,28 @@ async function main(): Promise<void> {
   if (args.command === "daemon") {
     await runDaemon();
     return;
+  }
+  if (args.command === "watchdog") {
+    await runWatchdog();
+    return;
+  }
+  if (args.command === "autostart") {
+    const action = args.subcommand ?? "status";
+    if (action === "on") {
+      await installAutostart();
+      console.log("Watchdog installed: the router starts at logon and is re-checked every 60 seconds.");
+      return;
+    }
+    if (action === "off") {
+      await uninstallAutostart();
+      console.log("Watchdog removed.");
+      return;
+    }
+    if (action === "status") {
+      console.log((await autostartInstalled()) ? "Watchdog: installed." : "Watchdog: not installed.");
+      return;
+    }
+    throw new Error("Usage: codex-fallback autostart on|off|status");
   }
   if (args.command === "check") {
     await handleCheck();

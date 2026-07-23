@@ -84,6 +84,7 @@ codex-fallback start [--quiet]
 codex-fallback stop
 codex-fallback status
 codex-fallback check
+codex-fallback autostart on|off|status
 codex-fallback smoke-test [--model <id>]
 codex-fallback uninstall [--keep-secret]
 ```
@@ -123,6 +124,7 @@ codex-fallback mode auto
 - Codex 客户端一断开，重试立即停止；绝不往已断开的客户端写字节。
 - 上游 socket 超时只在收到响应头之前生效，长 SSE 流不会在"长思考"途中被截断。
 - daemon 吸收每连接及意外错误（记为 `daemon_uncaught` 日志，含脱敏错误码）而不是崩溃——路由器是本地可用性依赖，必须活着。
+- 登录看门狗（HKCU Run 键，无需管理员权限）在每次 Windows 登录时拉起路由器并每 60 秒复查一次，重启和 daemon 意外死亡都能自愈，不再依赖 Codex 的 SessionStart 钩子。用 `codex-fallback autostart on|off|status` 管理；`install` 时自动注册，`uninstall` 时自动移除。
 - 每条 `upstream_retry`/`upstream_error` 日志都带脱敏网络错误码（如 `ECONNRESET`），便于快速定位。
 
 ## 故障转移策略

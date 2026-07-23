@@ -16,6 +16,14 @@ codex-fallback start
 
 No Codex restart is needed; the next message works immediately. Since v0.2.3 the daemon absorbs unexpected per-connection errors instead of crashing, and records `daemon_uncaught` events (with a sanitized detail code) in `%LOCALAPPDATA%\codex-fallback-router\router.log` — check that log first if the daemon ever dies again. A stale `router.pid.json` without a running process means the previous daemon exited uncleanly; `start` reconciles it.
 
+Since v0.2.4 a logon watchdog (HKCU Run key, no administrator rights) starts the router at every Windows logon and re-checks it every 60 seconds, so reboots and later daemon deaths heal on their own even when Codex does not fire its SessionStart hook. Manage it with:
+
+```powershell
+codex-fallback autostart status
+codex-fallback autostart on
+codex-fallback autostart off
+```
+
 ## Codex cannot connect after installation
 
 Open PowerShell outside Codex and try:

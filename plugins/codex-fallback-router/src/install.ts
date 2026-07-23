@@ -19,6 +19,7 @@ import {
   writeCodexConfig,
   type RootConfigValues,
 } from "./codex-config.js";
+import { installAutostart, uninstallAutostart } from "./autostart.js";
 import { readRouterConfig, writeRouterConfig } from "./config.js";
 import { readApiKey } from "./dpapi.js";
 import { getHealth, startDaemon, stopDaemon } from "./daemon.js";
@@ -146,7 +147,15 @@ export async function installRouter(options: {
       marketplaceRoot: sourceTree.repoRoot,
     };
     await atomicWriteFile(paths.stateFile, `${JSON.stringify(state, null, 2)}\n`);
+    // The SessionStart hook only fires for new Codex sessions; the watchdog
+    // scheduled task covers reboots and any later daemon death on its own.
+    await installAutostart(paths);
   } catch (error) {
+    try {
+      await uninstallAutostart();
+    } catch {
+      // Continue rolling back the Codex configuration even if task cleanup fails.
+    }
     if (daemonStarted) {
       try {
         await stopDaemon(paths);
@@ -184,6 +193,11 @@ export async function uninstallRouter(options: {
   paths?: AppPaths;
 }): Promise<{ restored: boolean }> {
   const paths = options.paths ?? getAppPaths();
+  try {
+    await uninstallAutostart();
+  } catch {
+    // Continue removal even if the watchdog task cannot be deleted.
+  }
   const state = await readInstallState(paths);
   try {
     const routerConfig = await readRouterConfig(paths);

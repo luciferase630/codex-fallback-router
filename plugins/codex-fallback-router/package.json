@@ -1,6 +1,6 @@
 {
   "name": "codex-fallback-router",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "Local usage-limit fallback router for Codex Desktop",
   "type": "module",
   "license": "Apache-2.0",

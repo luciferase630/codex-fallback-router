@@ -159,6 +159,33 @@ export async function startDaemon(options: {
   throw new Error("Router daemon did not become healthy within 8 seconds.");
 }
 
+/**
+ * Hidden logon watchdog loop: starts the daemon when it is missing and keeps
+ * watching. Launched by the HKCU Run entry (see autostart.ts), so a reboot or
+ * any later daemon death heals without a Codex SessionStart hook.
+ */
+export async function runWatchdog(options: {
+  intervalMs?: number;
+  iterations?: number;
+  isHealthy?: () => Promise<boolean>;
+  start?: () => Promise<unknown>;
+  paths?: AppPaths;
+} = {}): Promise<void> {
+  const paths = options.paths ?? getAppPaths();
+  const intervalMs = options.intervalMs ?? 60_000;
+  const iterations = options.iterations ?? Number.POSITIVE_INFINITY;
+  const isHealthy = options.isHealthy ?? (async () => Boolean(await getHealth(paths)));
+  const start = options.start ?? (() => startDaemon({ quiet: true, paths }));
+  for (let iteration = 0; iteration < iterations; iteration += 1) {
+    try {
+      if (!(await isHealthy())) await start();
+    } catch {
+      // Keep watching: a transient failure must never kill the watchdog.
+    }
+    await new Promise((resolve) => setTimeout(resolve, intervalMs));
+  }
+}
+
 export async function stopDaemon(paths: AppPaths = getAppPaths()): Promise<boolean> {
   let health = await getHealth(paths);
   if (!health) {
